@@ -1,0 +1,19 @@
+{
+  "name": "Fantasy World Map",
+  "short_name": "World Map",
+  "description": "Azgaar-style fantasy heightmap generator with mobile drawing tools.",
+  "start_url": ".",
+  "scope": ".",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0f2424",
+  "theme_color": "#1f382f",
+  "icons": [
+    {
+      "src": "./icons/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
