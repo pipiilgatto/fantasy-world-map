@@ -1,0 +1,20 @@
+{
+  "name": "fantasy-world-map",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "tsc && vite build",
+    "preview": "vite preview --host 0.0.0.0",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "alea": "^1.0.1",
+    "delaunator": "^5.0.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3",
+    "vite": "^6.3.3"
+  }
+}
