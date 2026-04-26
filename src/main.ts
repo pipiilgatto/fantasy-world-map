@@ -37,6 +37,7 @@ interface StoredState {
   heightmapId: HeightmapId;
   cellsDesired: number;
   renderStyle: RenderStyle;
+  setupPanelOpen: boolean;
   creationMode: boolean;
   activeTool: Tool;
   borderColor: string;
@@ -53,6 +54,7 @@ const defaultState: StoredState = {
   heightmapId: "continents",
   cellsDesired: 20000,
   renderStyle: "terrain",
+  setupPanelOpen: true,
   creationMode: false,
   activeTool: "border",
   borderColor: "#b92e3a",
@@ -64,6 +66,19 @@ const defaultState: StoredState = {
   settlements: []
 };
 
+interface Viewport {
+  scale: number;
+  x: number;
+  y: number;
+}
+
+interface TerrainCell {
+  path: Path2D;
+  color: string;
+  height: number;
+  point: Point;
+}
+
 let state = loadState();
 let grid: Grid | null = null;
 let heights: Uint8Array | null = null;
@@ -71,12 +86,26 @@ let currentStroke: Stroke | null = null;
 let activePointerId: number | null = null;
 let actionHistory: Array<{type: "stroke" | "settlement"; id: string}> = [];
 let deferredInstallPrompt: Event | null = null;
+let terrainCells: TerrainCell[] = [];
+let viewport: Viewport = {scale: 1, x: 0, y: 0};
+let fitScale = 1;
+let stageSize = {width: 0, height: 0};
+let viewportInitialized = false;
+let activePointers = new Map<number, Point>();
+let gesture:
+  | {type: "pan"; last: Point}
+  | {type: "pinch"; distance: number; scale: number; center: Point; worldCenter: Point}
+  | {type: "draw"}
+  | null = null;
+let lastOrientation = getOrientation();
 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("App root not found");
 
+updateViewportVars();
+
 app.innerHTML = `
-  <div class="shell ${state.creationMode ? "creation" : ""}" id="shell">
+  <div class="shell ${state.creationMode ? "creation" : ""} ${state.setupPanelOpen ? "setup-open" : ""}" id="shell">
     <header class="topbar" id="topbar">
       <div class="field compact">
         <span>Template</span>
@@ -115,9 +144,16 @@ app.innerHTML = `
     </main>
 
     <nav class="floatbar" aria-label="Map actions">
+      <button class="button glass" id="setupToggle" type="button"></button>
       <button class="button glass" id="creationToggle" type="button"></button>
       <button class="button glass creation-only" id="toolsToggle" type="button">Tools</button>
       <button class="button glass" id="installButton" type="button" hidden>Install</button>
+    </nav>
+
+    <nav class="zoombar" aria-label="Map zoom controls">
+      <button class="button glass icon-button" id="zoomOutButton" type="button" aria-label="Zoom out">-</button>
+      <button class="button glass fit-button" id="zoomFitButton" type="button">Fit</button>
+      <button class="button glass icon-button" id="zoomInButton" type="button" aria-label="Zoom in">+</button>
     </nav>
 
     <section class="editor-drawer" id="editorDrawer" aria-label="Creation tools">
@@ -166,9 +202,13 @@ const editCanvas = document.querySelector<HTMLCanvasElement>("#editCanvas")!;
 const loading = document.querySelector<HTMLDivElement>("#loading")!;
 const statusPill = document.querySelector<HTMLDivElement>("#statusPill")!;
 const editorDrawer = document.querySelector<HTMLElement>("#editorDrawer")!;
+const setupToggle = document.querySelector<HTMLButtonElement>("#setupToggle")!;
 const creationToggle = document.querySelector<HTMLButtonElement>("#creationToggle")!;
 const toolsToggle = document.querySelector<HTMLButtonElement>("#toolsToggle")!;
 const installButton = document.querySelector<HTMLButtonElement>("#installButton")!;
+const zoomOutButton = document.querySelector<HTMLButtonElement>("#zoomOutButton")!;
+const zoomFitButton = document.querySelector<HTMLButtonElement>("#zoomFitButton")!;
+const zoomInButton = document.querySelector<HTMLButtonElement>("#zoomInButton")!;
 const seedInput = document.querySelector<HTMLInputElement>("#seedInput")!;
 const heightmapSelect = document.querySelector<HTMLSelectElement>("#heightmapSelect")!;
 const detailSelect = document.querySelector<HTMLSelectElement>("#detailSelect")!;
@@ -185,8 +225,6 @@ const clearButton = document.querySelector<HTMLButtonElement>("#clearButton")!;
 const exportButton = document.querySelector<HTMLButtonElement>("#exportButton")!;
 
 const generator = new HeightmapGenerator();
-const rasterCanvas = document.createElement("canvas");
-const rasterContext = rasterCanvas.getContext("2d", {willReadFrequently: true});
 
 populateHeightmapSelect();
 hydrateControls();
@@ -239,12 +277,30 @@ function hydrateControls(): void {
   borderWidth.value = String(state.borderWidth);
   roadWidth.value = String(state.roadWidth);
   snapRoads.checked = state.snapRoads;
+  if (isCompactLandscape()) state.setupPanelOpen = false;
+  updateSetupUi();
   updateModeUi();
   updateToolButtons();
 }
 
 function bindEvents(): void {
   window.addEventListener("resize", () => {
+    updateViewportVars();
+    const orientation = getOrientation();
+    if (orientation !== lastOrientation) {
+      lastOrientation = orientation;
+      if (orientation === "landscape" && isCompactViewport()) {
+        state.setupPanelOpen = false;
+        saveState();
+      }
+      updateSetupUi();
+    }
+    resizeCanvases();
+    renderAll();
+  });
+
+  window.visualViewport?.addEventListener("resize", () => {
+    updateViewportVars();
     resizeCanvases();
     renderAll();
   });
@@ -280,7 +336,14 @@ function bindEvents(): void {
   renderSelect.addEventListener("change", () => {
     state.renderStyle = renderSelect.value as RenderStyle;
     saveState();
+    buildTerrainCells();
     renderBaseMap();
+  });
+
+  setupToggle.addEventListener("click", () => {
+    state.setupPanelOpen = !state.setupPanelOpen;
+    saveState();
+    updateSetupUi();
   });
 
   creationToggle.addEventListener("click", () => {
@@ -331,6 +394,20 @@ function bindEvents(): void {
   clearButton.addEventListener("click", clearCreationLayer);
   exportButton.addEventListener("click", exportPng);
 
+  zoomOutButton.addEventListener("click", () => zoomAt([stageSize.width / 2, stageSize.height / 2], 1 / 1.7));
+  zoomInButton.addEventListener("click", () => zoomAt([stageSize.width / 2, stageSize.height / 2], 1.7));
+  zoomFitButton.addEventListener("click", () => fitMap());
+
+  mapStage.addEventListener(
+    "wheel",
+    event => {
+      event.preventDefault();
+      const factor = Math.exp(-event.deltaY * 0.0015);
+      zoomAt(eventToStagePoint(event), factor);
+    },
+    {passive: false}
+  );
+
   editCanvas.addEventListener("pointerdown", onPointerDown);
   editCanvas.addEventListener("pointermove", onPointerMove);
   editCanvas.addEventListener("pointerup", onPointerUp);
@@ -367,6 +444,8 @@ async function regenerateMap(): Promise<void> {
     grid = generateGrid(state.seed, WORLD_WIDTH, WORLD_HEIGHT, state.cellsDesired);
     heights = await generator.generate(grid, state.heightmapId, state.seed);
     grid.cells.h = heights;
+    buildTerrainCells();
+    fitMap(false);
     renderBaseMap();
     renderEditLayer();
     const name = allHeightmaps[state.heightmapId]?.name || state.heightmapId;
@@ -381,22 +460,33 @@ async function regenerateMap(): Promise<void> {
 
 function resizeCanvases(): void {
   const rect = mapStage.getBoundingClientRect();
-  const scale = Math.min(rect.width / WORLD_WIDTH, rect.height / WORLD_HEIGHT);
-  const cssWidth = WORLD_WIDTH * scale;
-  const cssHeight = WORLD_HEIGHT * scale;
-  const left = (rect.width - cssWidth) / 2;
-  const top = (rect.height - cssHeight) / 2;
+  const oldCenter = viewportInitialized ? screenToWorld([stageSize.width / 2, stageSize.height / 2]) : null;
+  stageSize = {width: rect.width, height: rect.height};
+  fitScale = Math.min(stageSize.width / WORLD_WIDTH, stageSize.height / WORLD_HEIGHT);
 
   for (const canvas of [mapCanvas, editCanvas]) {
     const dpr = window.devicePixelRatio || 1;
-    canvas.width = Math.round(WORLD_WIDTH * dpr);
-    canvas.height = Math.round(WORLD_HEIGHT * dpr);
-    canvas.style.width = `${cssWidth}px`;
-    canvas.style.height = `${cssHeight}px`;
-    canvas.style.left = `${left}px`;
-    canvas.style.top = `${top}px`;
+    canvas.width = Math.round(stageSize.width * dpr);
+    canvas.height = Math.round(stageSize.height * dpr);
+    canvas.style.width = `${stageSize.width}px`;
+    canvas.style.height = `${stageSize.height}px`;
+    canvas.style.left = "0";
+    canvas.style.top = "0";
     const context = canvas.getContext("2d");
     context?.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  if (!viewportInitialized) {
+    fitMap(false);
+    viewportInitialized = true;
+    return;
+  }
+
+  if (oldCenter) {
+    viewport.scale = Math.max(viewport.scale, fitScale);
+    viewport.x = stageSize.width / 2 - oldCenter[0] * viewport.scale;
+    viewport.y = stageSize.height / 2 - oldCenter[1] * viewport.scale;
+    clampViewport();
   }
 }
 
@@ -406,30 +496,75 @@ function renderAll(): void {
 }
 
 function renderBaseMap(): void {
-  if (!grid || !heights || !rasterContext) return;
+  const context = mapCanvas.getContext("2d")!;
+  prepareScreenContext(context);
+  drawTerrain(context, viewport, true);
+}
 
-  rasterCanvas.width = grid.cellsX;
-  rasterCanvas.height = grid.cellsY;
-  const imageData = rasterContext.createImageData(grid.cellsX, grid.cellsY);
+function buildTerrainCells(): void {
+  if (!grid || !heights) return;
+  terrainCells = [];
 
   for (let index = 0; index < heights.length; index++) {
+    const vertexIds = grid.cells.v[index];
+    if (!vertexIds?.length) continue;
+    const path = new Path2D();
+    const first = grid.vertices.p[vertexIds[0]];
+    if (!first) continue;
+    path.moveTo(first[0], first[1]);
+
+    for (const vertexId of vertexIds.slice(1)) {
+      const point = grid.vertices.p[vertexId];
+      if (point) path.lineTo(point[0], point[1]);
+    }
+
+    path.closePath();
     const height = heights[index] ?? 0;
     const shade = getHillshade(index, height);
     const [red, green, blue] = colorForHeight(height, shade);
-    const offset = index * 4;
-    imageData.data[offset] = red;
-    imageData.data[offset + 1] = green;
-    imageData.data[offset + 2] = blue;
-    imageData.data[offset + 3] = 255;
+    terrainCells.push({
+      path,
+      color: `rgb(${red} ${green} ${blue})`,
+      height,
+      point: grid.points[index]
+    });
+  }
+}
+
+function drawTerrain(context: CanvasRenderingContext2D, view: Viewport, cull: boolean): void {
+  context.fillStyle = "#173135";
+  context.fillRect(
+    0,
+    0,
+    cull ? stageSize.width : context.canvas.width,
+    cull ? stageSize.height : context.canvas.height
+  );
+  context.save();
+  context.translate(view.x, view.y);
+  context.scale(view.scale, view.scale);
+
+  const visibleLeft = (-view.x - 50) / view.scale;
+  const visibleTop = (-view.y - 50) / view.scale;
+  const visibleRight = (stageSize.width - view.x + 50) / view.scale;
+  const visibleBottom = (stageSize.height - view.y + 50) / view.scale;
+
+  for (const cell of terrainCells) {
+    if (
+      cull &&
+      (cell.point[0] < visibleLeft ||
+        cell.point[0] > visibleRight ||
+        cell.point[1] < visibleTop ||
+        cell.point[1] > visibleBottom)
+    ) {
+      continue;
+    }
+
+    context.fillStyle = cell.color;
+    context.fill(cell.path);
   }
 
-  rasterContext.putImageData(imageData, 0, 0);
-
-  const context = mapCanvas.getContext("2d")!;
-  context.clearRect(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
-  context.imageSmoothingEnabled = true;
-  context.drawImage(rasterCanvas, 0, 0, WORLD_WIDTH, WORLD_HEIGHT);
   drawCoastGlow(context);
+  context.restore();
 }
 
 function drawCoastGlow(context: CanvasRenderingContext2D): void {
@@ -492,8 +627,12 @@ function mix(a: [number, number, number], b: [number, number, number], t: number
 
 function renderEditLayer(): void {
   const context = editCanvas.getContext("2d")!;
-  context.clearRect(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
+  prepareScreenContext(context);
+  context.save();
+  context.translate(viewport.x, viewport.y);
+  context.scale(viewport.scale, viewport.scale);
   drawOverlay(context, [...state.strokes, ...(currentStroke ? [currentStroke] : [])], state.settlements);
+  context.restore();
 }
 
 function drawOverlay(context: CanvasRenderingContext2D, strokes: Stroke[], settlements: Settlement[]): void {
@@ -557,11 +696,25 @@ function drawTown(context: CanvasRenderingContext2D, x: number, y: number): void
 }
 
 function onPointerDown(event: PointerEvent): void {
-  if (!state.creationMode) return;
   event.preventDefault();
-  activePointerId = event.pointerId;
+  const stagePoint = eventToStagePoint(event);
+  activePointers.set(event.pointerId, stagePoint);
   editCanvas.setPointerCapture(event.pointerId);
 
+  if (activePointers.size === 2) {
+    currentStroke = null;
+    activePointerId = null;
+    beginPinchGesture();
+    renderEditLayer();
+    return;
+  }
+
+  if (!state.creationMode) {
+    gesture = {type: "pan", last: stagePoint};
+    return;
+  }
+
+  activePointerId = event.pointerId;
   const point = eventToWorldPoint(event);
   if (state.activeTool === "capital" || state.activeTool === "town") {
     const settlement: Settlement = {
@@ -584,22 +737,57 @@ function onPointerDown(event: PointerEvent): void {
     width: state.activeTool === "road" ? state.roadWidth : state.borderWidth,
     points: [point]
   };
+  gesture = {type: "draw"};
   renderEditLayer();
 }
 
 function onPointerMove(event: PointerEvent): void {
-  if (!currentStroke || event.pointerId !== activePointerId) return;
+  if (!activePointers.has(event.pointerId)) return;
   event.preventDefault();
+  const stagePoint = eventToStagePoint(event);
+  activePointers.set(event.pointerId, stagePoint);
+
+  if (activePointers.size >= 2) {
+    if (gesture?.type !== "pinch") beginPinchGesture();
+    updatePinchGesture();
+    return;
+  }
+
+  if (gesture?.type === "pan") {
+    viewport.x += stagePoint[0] - gesture.last[0];
+    viewport.y += stagePoint[1] - gesture.last[1];
+    gesture.last = stagePoint;
+    clampViewport();
+    renderAll();
+    return;
+  }
+
+  if (!currentStroke || event.pointerId !== activePointerId) return;
   const point = eventToWorldPoint(event);
   const last = currentStroke.points[currentStroke.points.length - 1];
-  if (distance(last, point) < 2) return;
+  if (distance(last, point) < 2 / viewport.scale) return;
   currentStroke.points.push(point);
   renderEditLayer();
 }
 
 function onPointerUp(event: PointerEvent): void {
-  if (event.pointerId !== activePointerId) return;
+  activePointers.delete(event.pointerId);
   editCanvas.releasePointerCapture(event.pointerId);
+
+  if (gesture?.type === "pinch") {
+    gesture = null;
+    if (activePointers.size === 1 && !state.creationMode) {
+      gesture = {type: "pan", last: [...activePointers.values()][0]};
+    }
+    return;
+  }
+
+  if (gesture?.type === "pan") {
+    gesture = null;
+    return;
+  }
+
+  if (event.pointerId !== activePointerId) return;
   activePointerId = null;
 
   if (!currentStroke) return;
@@ -617,14 +805,17 @@ function onPointerUp(event: PointerEvent): void {
   }
 
   currentStroke = null;
+  gesture = null;
   renderEditLayer();
 }
 
-function eventToWorldPoint(event: PointerEvent): Point {
+function eventToStagePoint(event: PointerEvent | WheelEvent): Point {
   const rect = editCanvas.getBoundingClientRect();
-  const x = ((event.clientX - rect.left) / rect.width) * WORLD_WIDTH;
-  const y = ((event.clientY - rect.top) / rect.height) * WORLD_HEIGHT;
-  return clampPoint([x, y], WORLD_WIDTH, WORLD_HEIGHT);
+  return [event.clientX - rect.left, event.clientY - rect.top];
+}
+
+function eventToWorldPoint(event: PointerEvent): Point {
+  return clampPoint(screenToWorld(eventToStagePoint(event)), WORLD_WIDTH, WORLD_HEIGHT);
 }
 
 function snapToSettlement(point: Point): Point {
@@ -674,11 +865,19 @@ function clearCreationLayer(): void {
 
 function exportPng(): void {
   const exportCanvas = document.createElement("canvas");
-  exportCanvas.width = WORLD_WIDTH;
-  exportCanvas.height = WORLD_HEIGHT;
+  const exportScale = 2;
+  exportCanvas.width = WORLD_WIDTH * exportScale;
+  exportCanvas.height = WORLD_HEIGHT * exportScale;
   const context = exportCanvas.getContext("2d")!;
-  context.drawImage(mapCanvas, 0, 0, WORLD_WIDTH, WORLD_HEIGHT);
+  const savedStageSize = {...stageSize};
+  const fullView = {scale: exportScale, x: 0, y: 0};
+  stageSize = {width: exportCanvas.width, height: exportCanvas.height};
+  drawTerrain(context, fullView, false);
+  context.save();
+  context.scale(exportScale, exportScale);
   drawOverlay(context, state.strokes, state.settlements);
+  context.restore();
+  stageSize = savedStageSize;
 
   const link = document.createElement("a");
   link.download = `fantasy-map-${state.seed}.png`;
@@ -686,10 +885,17 @@ function exportPng(): void {
   link.click();
 }
 
+function updateSetupUi(): void {
+  shell.classList.toggle("setup-open", state.setupPanelOpen);
+  setupToggle.textContent = state.setupPanelOpen ? "Hide" : "Setup";
+  setupToggle.ariaLabel = state.setupPanelOpen ? "Hide setup panel" : "Show setup panel";
+}
+
 function updateModeUi(): void {
   shell.classList.toggle("creation", state.creationMode);
-  creationToggle.textContent = state.creationMode ? "Exit" : "Creation";
-  editCanvas.style.pointerEvents = state.creationMode ? "auto" : "none";
+  creationToggle.textContent = state.creationMode ? "Exit" : "Create";
+  creationToggle.ariaLabel = state.creationMode ? "Exit creation mode" : "Enter creation mode";
+  editCanvas.style.pointerEvents = "auto";
   if (!state.creationMode) editorDrawer.classList.remove("open");
   renderEditLayer();
 }
@@ -699,4 +905,95 @@ function updateToolButtons(): void {
     button.classList.toggle("active", button.dataset.tool === state.activeTool);
   });
   statusPill.textContent = state.creationMode ? state.activeTool : statusPill.textContent;
+}
+
+function prepareScreenContext(context: CanvasRenderingContext2D): void {
+  const dpr = window.devicePixelRatio || 1;
+  context.setTransform(dpr, 0, 0, dpr, 0, 0);
+  context.clearRect(0, 0, stageSize.width, stageSize.height);
+}
+
+function fitMap(shouldRender = true): void {
+  viewport = {
+    scale: fitScale,
+    x: (stageSize.width - WORLD_WIDTH * fitScale) / 2,
+    y: (stageSize.height - WORLD_HEIGHT * fitScale) / 2
+  };
+  viewportInitialized = true;
+  if (shouldRender) renderAll();
+}
+
+function zoomAt(stagePoint: Point, factor: number): void {
+  const before = screenToWorld(stagePoint);
+  const maxScale = fitScale * 12;
+  viewport.scale = minmax(viewport.scale * factor, fitScale, maxScale);
+  viewport.x = stagePoint[0] - before[0] * viewport.scale;
+  viewport.y = stagePoint[1] - before[1] * viewport.scale;
+  clampViewport();
+  renderAll();
+}
+
+function clampViewport(): void {
+  viewport.scale = Math.max(viewport.scale, fitScale);
+  const mapWidth = WORLD_WIDTH * viewport.scale;
+  const mapHeight = WORLD_HEIGHT * viewport.scale;
+
+  viewport.x =
+    mapWidth <= stageSize.width
+      ? (stageSize.width - mapWidth) / 2
+      : minmax(viewport.x, stageSize.width - mapWidth, 0);
+
+  viewport.y =
+    mapHeight <= stageSize.height
+      ? (stageSize.height - mapHeight) / 2
+      : minmax(viewport.y, stageSize.height - mapHeight, 0);
+}
+
+function screenToWorld(point: Point): Point {
+  return [(point[0] - viewport.x) / viewport.scale, (point[1] - viewport.y) / viewport.scale];
+}
+
+function beginPinchGesture(): void {
+  const [a, b] = [...activePointers.values()];
+  if (!a || !b) return;
+  const center: Point = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+  gesture = {
+    type: "pinch",
+    distance: Math.max(distance(a, b), 1),
+    scale: viewport.scale,
+    center,
+    worldCenter: screenToWorld(center)
+  };
+}
+
+function updatePinchGesture(): void {
+  if (gesture?.type !== "pinch") return;
+  const [a, b] = [...activePointers.values()];
+  if (!a || !b) return;
+  const center: Point = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+  const nextDistance = Math.max(distance(a, b), 1);
+  viewport.scale = minmax(gesture.scale * (nextDistance / gesture.distance), fitScale, fitScale * 12);
+  viewport.x = center[0] - gesture.worldCenter[0] * viewport.scale;
+  viewport.y = center[1] - gesture.worldCenter[1] * viewport.scale;
+  clampViewport();
+  renderAll();
+}
+
+function getOrientation(): "landscape" | "portrait" {
+  return window.innerWidth > window.innerHeight ? "landscape" : "portrait";
+}
+
+function isCompactViewport(): boolean {
+  return window.innerWidth <= 920 || window.innerHeight <= 560;
+}
+
+function isCompactLandscape(): boolean {
+  return getOrientation() === "landscape" && isCompactViewport();
+}
+
+function updateViewportVars(): void {
+  const viewportWidth = window.visualViewport?.width || window.innerWidth;
+  const viewportHeight = window.visualViewport?.height || window.innerHeight;
+  document.documentElement.style.setProperty("--app-vw", `${viewportWidth}px`);
+  document.documentElement.style.setProperty("--app-vh", `${viewportHeight}px`);
 }
