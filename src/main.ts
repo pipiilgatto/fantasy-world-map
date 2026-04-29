@@ -58,6 +58,32 @@ const BIOME_PALETTE: Record<Biome, [number, number, number]> = {
   snow: [232, 231, 218]
 };
 
+const ELEVATION_STOPS: Array<[number, [number, number, number]]> = [
+  [0, [6, 28, 61]],
+  [8, [18, 69, 111]],
+  [16, [56, 131, 151]],
+  [SEA_LEVEL, [102, 178, 176]],
+  [23, [226, 207, 135]],
+  [32, [132, 171, 89]],
+  [48, [86, 139, 75]],
+  [62, [154, 147, 91]],
+  [76, [151, 113, 83]],
+  [88, [190, 179, 155]],
+  [100, [248, 246, 230]]
+];
+
+const RELIEF_STOPS: Array<[number, [number, number, number]]> = [
+  [0, [8, 31, 56]],
+  [12, [27, 86, 118]],
+  [SEA_LEVEL, [75, 145, 143]],
+  [24, [217, 198, 132]],
+  [36, [112, 157, 86]],
+  [54, [89, 128, 78]],
+  [68, [143, 131, 85]],
+  [82, [135, 103, 82]],
+  [100, [232, 229, 213]]
+];
+
 interface Stroke {
   id: string;
   kind: StrokeKind;
@@ -216,8 +242,8 @@ app.innerHTML = `
         <span>View</span>
         <select id="renderSelect">
           <option value="terrain">Terrain</option>
-          <option value="height">Height</option>
-          <option value="relief">Relief</option>
+          <option value="height">Elevation</option>
+          <option value="relief">Physical</option>
         </select>
       </div>
       <button class="button primary" id="generateButton" type="button">Generate</button>
@@ -809,14 +835,11 @@ function colorForSample(
   surfaceTexture: number
 ): number {
   if (state.renderStyle === "height") {
-    const value = Math.round((height / 100) * 255);
-    return packRgb(value, value, value);
+    return colorForElevationView(height, shade, largeTexture, fineTexture);
   }
 
   if (state.renderStyle === "relief") {
-    const value = minmax(Math.round(34 + height * 2.1 + shade * 1.2), 0, 255);
-    const blue = height < SEA_LEVEL ? minmax(value + 36, 0, 255) : minmax(value - 28, 0, 255);
-    return packRgb(value, minmax(value + 10, 0, 255), blue);
+    return colorForReliefView(height, moisture, temperature, shade, largeTexture, fineTexture, ridgeTexture);
   }
 
   if (height < SEA_LEVEL || biome === "lake") {
@@ -867,6 +890,60 @@ function colorForSample(
   b += cloudlessSatelliteVariation * 5;
 
   return packRgb(r, g, b);
+}
+
+function colorForElevationView(height: number, shade: number, largeTexture: number, fineTexture: number): number {
+  const base = colorFromStops(ELEVATION_STOPS, height);
+  const water = height < SEA_LEVEL;
+  const contour = contourStrength(height, water ? 4 : 10, water ? 0.18 : 0.28);
+  const majorContour = contourStrength(height, water ? 12 : 25, water ? 0.22 : 0.36);
+  const coast = 1 - smoothstep(Math.abs(height - SEA_LEVEL) / 1.35);
+  const tint = (largeTexture - 0.5) * 8 + (fineTexture - 0.5) * 4 + shade * (water ? 0.24 : 0.7);
+  const line = contour * 16 + majorContour * 20;
+  const highlight = majorContour * 4 + coast * 22;
+  const r = base[0] + tint - line + highlight;
+  const g = base[1] + tint - line * 0.85 + highlight;
+  const b = base[2] + tint - line * 0.65 + (water ? highlight * 0.35 : highlight * 0.2);
+  return packRgb(r, g, b);
+}
+
+function colorForReliefView(
+  height: number,
+  moisture: number,
+  temperature: number,
+  shade: number,
+  largeTexture: number,
+  fineTexture: number,
+  ridgeTexture: number
+): number {
+  const base = colorFromStops(RELIEF_STOPS, height);
+  const water = height < SEA_LEVEL;
+  const landRise = minmax((height - SEA_LEVEL) / 76, 0, 1);
+  const relief = shade * (water ? 0.32 : 1.6 + landRise * 0.45);
+  const surface = (largeTexture - 0.5) * (water ? 9 : 12) + (fineTexture - 0.5) * (water ? 5 : 8);
+  const ridge = Math.max(0, ridgeTexture - 0.48) * (height > 60 ? 30 : 12);
+  const vegetation = water ? 0 : moisture * 7 - temperature * 2;
+  const snow = smoothstep((height - 84) / 10);
+  const r = base[0] + relief + surface + ridge + landRise * 4 + snow * 22;
+  const g = base[1] + relief + surface * 0.8 + vegetation + snow * 22;
+  const b = base[2] + relief * 0.85 + surface * 0.6 - landRise * 4 + (water ? 10 : 0) + snow * 24;
+  return packRgb(r, g, b);
+}
+
+function colorFromStops(stops: Array<[number, [number, number, number]]>, value: number): [number, number, number] {
+  if (value <= stops[0][0]) return stops[0][1];
+  for (let index = 1; index < stops.length; index++) {
+    const [stopValue, stopColor] = stops[index];
+    const [previousValue, previousColor] = stops[index - 1];
+    if (value <= stopValue) return mix(previousColor, stopColor, (value - previousValue) / (stopValue - previousValue));
+  }
+  return stops[stops.length - 1][1];
+}
+
+function contourStrength(value: number, interval: number, width: number): number {
+  const offset = ((value % interval) + interval) % interval;
+  const edgeDistance = Math.min(offset, interval - offset);
+  return 1 - smoothstep(edgeDistance / width);
 }
 
 function smoothGridField(source: Float32Array, passes: number): Float32Array {
@@ -1528,14 +1605,14 @@ function getHillshade(index: number, height: number): number {
 
 function colorForHeight(height: number, shade: number): [number, number, number] {
   if (state.renderStyle === "height") {
-    const value = Math.round((height / 100) * 255);
-    return [value, value, value];
+    const base = colorFromStops(ELEVATION_STOPS, height);
+    const contour = contourStrength(height, height < SEA_LEVEL ? 4 : 10, height < SEA_LEVEL ? 0.18 : 0.28);
+    return base.map(channel => minmax(Math.round(channel + shade * 0.55 - contour * 14), 0, 255)) as [number, number, number];
   }
 
   if (state.renderStyle === "relief") {
-    const value = minmax(Math.round(36 + height * 2.15 + shade), 0, 255);
-    const blue = height < 20 ? minmax(value + 34, 0, 255) : minmax(value - 26, 0, 255);
-    return [value, minmax(value + 10, 0, 255), blue];
+    const base = colorFromStops(RELIEF_STOPS, height);
+    return base.map(channel => minmax(Math.round(channel + shade), 0, 255)) as [number, number, number];
   }
 
   let base: [number, number, number];
