@@ -1,12 +1,15 @@
 # Fantasy World Map
 
-Installable web app for generating Azgaar-style fantasy heightmaps and drawing custom political layers on top of the plain world map.
+Installable web app for generating Azgaar-style fantasy heightmaps, rendering them as a richer fantasy atlas, and drawing custom political layers on top of the plain world map.
 
 ## Features
 
 - Procedural heightmap templates ported from Azgaar's Fantasy Map Generator.
 - Precreated heightmap PNG support from Azgaar's public heightmap set.
+- High-resolution, Google Earth-inspired terrain raster generated from Azgaar-style height fields with smooth biomes, relief shading, lakes, rivers, beaches, and coastal water depth.
+- Crisp zoom and pan with progressive natural detail instead of visible Voronoi cells.
 - Mobile creation mode with a hidden drawer for borders, capitals, towns, and roads.
+- Smoothed, screen-stable borders and cased roads with settlement snapping.
 - Local persistence for drawing layers.
 - PNG export.
 - PWA manifest and service worker for Android installation.
