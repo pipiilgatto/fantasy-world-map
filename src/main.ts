@@ -73,15 +73,17 @@ const ELEVATION_STOPS: Array<[number, [number, number, number]]> = [
 ];
 
 const RELIEF_STOPS: Array<[number, [number, number, number]]> = [
-  [0, [8, 31, 56]],
-  [12, [27, 86, 118]],
-  [SEA_LEVEL, [75, 145, 143]],
-  [24, [217, 198, 132]],
-  [36, [112, 157, 86]],
-  [54, [89, 128, 78]],
-  [68, [143, 131, 85]],
-  [82, [135, 103, 82]],
-  [100, [232, 229, 213]]
+  [0, [3, 18, 48]],
+  [8, [12, 55, 94]],
+  [16, [45, 117, 138]],
+  [SEA_LEVEL, [110, 170, 156]],
+  [25, [75, 135, 77]],
+  [42, [122, 160, 86]],
+  [58, [185, 171, 96]],
+  [72, [169, 126, 76]],
+  [84, [143, 121, 105]],
+  [93, [211, 209, 193]],
+  [100, [248, 247, 236]]
 ];
 
 const SATELLITE_LAND_STOPS: Array<[number, [number, number, number]]> = [
@@ -146,7 +148,7 @@ const defaultState: StoredState = {
   seed: "20260425",
   heightmapId: "continents",
   cellsDesired: 20000,
-  renderStyle: "terrain",
+  renderStyle: "relief",
   setupPanelOpen: false,
   creationMode: false,
   activeTool: "border",
@@ -291,14 +293,6 @@ app.innerHTML = `
           <option value="50000">50k</option>
         </select>
       </div>
-      <div class="field compact">
-        <span>View</span>
-        <select id="renderSelect">
-          <option value="terrain">Terrain</option>
-          <option value="height">Elevation</option>
-          <option value="relief">Physical</option>
-        </select>
-      </div>
       <button class="button primary" id="generateButton" type="button">Generate</button>
       <button class="button" id="randomButton" type="button">Random</button>
     </header>
@@ -379,7 +373,6 @@ const zoomInButton = document.querySelector<HTMLButtonElement>("#zoomInButton")!
 const seedInput = document.querySelector<HTMLInputElement>("#seedInput")!;
 const heightmapSelect = document.querySelector<HTMLSelectElement>("#heightmapSelect")!;
 const detailSelect = document.querySelector<HTMLSelectElement>("#detailSelect")!;
-const renderSelect = document.querySelector<HTMLSelectElement>("#renderSelect")!;
 const generateButton = document.querySelector<HTMLButtonElement>("#generateButton")!;
 const randomButton = document.querySelector<HTMLButtonElement>("#randomButton")!;
 const borderColor = document.querySelector<HTMLInputElement>("#borderColor")!;
@@ -408,6 +401,7 @@ function loadState(): StoredState {
     return {
       ...defaultState,
       ...parsed,
+      renderStyle: "relief",
       strokes: Array.isArray(parsed.strokes) ? parsed.strokes : [],
       settlements: Array.isArray(parsed.settlements) ? parsed.settlements : []
     };
@@ -438,7 +432,6 @@ function hydrateControls(): void {
   seedInput.value = state.seed;
   heightmapSelect.value = state.heightmapId;
   detailSelect.value = String(state.cellsDesired);
-  renderSelect.value = state.renderStyle;
   borderColor.value = state.borderColor;
   roadColor.value = state.roadColor;
   borderWidth.value = String(state.borderWidth);
@@ -476,7 +469,7 @@ function bindEvents(): void {
     state.seed = seedInput.value.trim() || state.seed;
     state.heightmapId = heightmapSelect.value as HeightmapId;
     state.cellsDesired = Number(detailSelect.value);
-    state.renderStyle = renderSelect.value as RenderStyle;
+    state.renderStyle = "relief";
     saveState();
     void regenerateMap();
   });
@@ -498,13 +491,6 @@ function bindEvents(): void {
     state.cellsDesired = Number(detailSelect.value);
     saveState();
     void regenerateMap();
-  });
-
-  renderSelect.addEventListener("change", () => {
-    state.renderStyle = renderSelect.value as RenderStyle;
-    saveState();
-    buildTerrainCells();
-    renderBaseMap();
   });
 
   setupToggle.addEventListener("click", () => {
@@ -748,17 +734,7 @@ function drawTerrain(context: CanvasRenderingContext2D, view: Viewport, cull: bo
   context.imageSmoothingQuality = "high";
   context.drawImage(terrainRasterCanvas, 0, 0, WORLD_WIDTH, WORLD_HEIGHT);
 
-  if (state.renderStyle !== "height") {
-    if (!state.creationMode) drawMapTexture(context, view, bounds, cull);
-    if (!state.creationMode && state.renderStyle === "terrain") drawTerrainRidges(context, view, bounds, cull);
-    drawRiversLayer(context, bounds, cull);
-    if (!state.creationMode) {
-      drawNaturalSymbols(context, view, bounds, cull);
-      if (state.renderStyle === "terrain") drawMapLabels(context, view, bounds, cull);
-    }
-  } else {
-    drawCoastGlow(context);
-  }
+  drawRiversLayer(context, bounds, cull);
 
   context.restore();
   drawScreenAtmosphere(context, width, height);
@@ -775,7 +751,7 @@ function buildTerrainRaster(): void {
   const context = terrainRasterCanvas.getContext("2d", {alpha: false});
   if (!context) return;
 
-  const rasterHeightField = smoothGridField(heightField, 3);
+  const rasterHeightField = smoothGridField(heightField, 7);
   const rasterMoistureField = smoothGridField(moistureField, 3);
   const rasterTemperatureField = smoothGridField(temperatureField, 2);
   const rasterRuggednessField = smoothGridField(ruggednessField, 1);
@@ -815,7 +791,7 @@ function buildTerrainRaster(): void {
       const h10 = rasterHeightField[i10];
       const h01 = rasterHeightField[i01];
       const h11 = rasterHeightField[i11];
-      let sampledHeight = bilerp(h00, h10, h01, h11, tx, ty);
+      let sampledHeight = sampleGridBicubic(rasterHeightField, cellsX, cellsY, gx, gy);
       const moisture = bilerp(
         rasterMoistureField[i00],
         rasterMoistureField[i10],
@@ -841,10 +817,10 @@ function buildTerrainRaster(): void {
         ty
       );
       const lake = bilerp(rasterLakeField[i00], rasterLakeField[i10], rasterLakeField[i01], rasterLakeField[i11], tx, ty);
-      const largeTexture = valueNoise2(worldX, worldY, 92, 3);
-      const fineTexture = valueNoise2(worldX, worldY, 23, 9);
-      const ridgeTexture = valueNoise2(worldX + worldY * 0.38, worldY - worldX * 0.22, 42, 15);
-      const surfaceTexture = valueNoise2(worldX + 310, worldY - 240, 9, 29);
+      const largeTexture = terrainNoise2(worldX, worldY, 112, 3);
+      const fineTexture = terrainNoise2(worldX + 24, worldY - 18, 29, 9);
+      const ridgeTexture = terrainNoise2(worldX + worldY * 0.38, worldY - worldX * 0.22, 46, 15);
+      const surfaceTexture = terrainNoise2(worldX + 310, worldY - 240, 12, 29);
       sampledHeight += (largeTexture - 0.5) * 1.8 + (fineTexture - 0.5) * 1.15 + (surfaceTexture - 0.5) * 0.45;
 
       const west = h00 + (h01 - h00) * ty;
@@ -880,6 +856,7 @@ function buildTerrainRaster(): void {
   }
 
   context.putImageData(image, 0, 0);
+  softenTerrainRaster(context, rasterWidth, rasterHeight);
 }
 
 function colorForSample(
@@ -897,33 +874,20 @@ function colorForSample(
   surfaceTexture: number,
   slope: number
 ): number {
-  if (state.renderStyle === "height") {
-    return colorForElevationView(height, shade, largeTexture, fineTexture);
-  }
+  return colorForReliefView(height, moisture, temperature, ruggedness, shade, largeTexture, fineTexture, ridgeTexture, surfaceTexture, slope);
+}
 
-  if (state.renderStyle === "relief") {
-    return colorForReliefView(height, moisture, temperature, shade, largeTexture, fineTexture, ridgeTexture);
-  }
-
-  if (height < SEA_LEVEL || biome === "lake") {
-    return colorForSatelliteWater(height, biome === "lake", shade, largeTexture, fineTexture, ridgeTexture, surfaceTexture);
-  }
-
-  return colorForSatelliteLand(
-    x,
-    y,
-    height,
-    moisture,
-    temperature,
-    ruggedness,
-    biome,
-    shade,
-    largeTexture,
-    fineTexture,
-    ridgeTexture,
-    surfaceTexture,
-    slope
-  );
+function softenTerrainRaster(context: CanvasRenderingContext2D, width: number, height: number): void {
+  const temp = document.createElement("canvas");
+  temp.width = width;
+  temp.height = height;
+  const tempContext = temp.getContext("2d");
+  if (!tempContext) return;
+  tempContext.drawImage(terrainRasterCanvas, 0, 0);
+  context.save();
+  context.filter = "blur(1.15px)";
+  context.drawImage(temp, 0, 0);
+  context.restore();
 }
 
 function colorForSatelliteWater(
@@ -1079,22 +1043,49 @@ function colorForReliefView(
   height: number,
   moisture: number,
   temperature: number,
+  ruggedness: number,
   shade: number,
   largeTexture: number,
   fineTexture: number,
-  ridgeTexture: number
+  ridgeTexture: number,
+  surfaceTexture: number,
+  slope: number
 ): number {
   const base = colorFromStops(RELIEF_STOPS, height);
   const water = height < SEA_LEVEL;
-  const landRise = minmax((height - SEA_LEVEL) / 76, 0, 1);
-  const relief = shade * (water ? 0.32 : 1.6 + landRise * 0.45);
-  const surface = (largeTexture - 0.5) * (water ? 9 : 12) + (fineTexture - 0.5) * (water ? 5 : 8);
-  const ridge = Math.max(0, ridgeTexture - 0.48) * (height > 60 ? 30 : 12);
-  const vegetation = water ? 0 : moisture * 7 - temperature * 2;
-  const snow = smoothstep((height - 84) / 10);
-  const r = base[0] + relief + surface + ridge + landRise * 4 + snow * 22;
-  const g = base[1] + relief + surface * 0.8 + vegetation + snow * 22;
-  const b = base[2] + relief * 0.85 + surface * 0.6 - landRise * 4 + (water ? 10 : 0) + snow * 24;
+
+  if (water) {
+    const depth = minmax((SEA_LEVEL - height) / SEA_LEVEL, 0, 1);
+    const bathyLine = contourStrength(height, 4, 0.16) * 8 + contourStrength(height, 12, 0.18) * 10;
+    const surface = (largeTexture - 0.5) * 8 + (fineTexture - 0.5) * 4 + (surfaceTexture - 0.5) * 4;
+    const shelf = (1 - smoothstep(depth / 0.22)) * 18;
+    return packRgb(base[0] + surface - bathyLine * 0.35 + shelf * 0.12, base[1] + surface * 0.9 - bathyLine * 0.2 + shelf * 0.72, base[2] + surface + shelf);
+  }
+
+  const landRise = minmax((height - SEA_LEVEL) / 78, 0, 1);
+  const steep = minmax((slope + ruggedness * 0.2) / 15, 0, 1);
+  const hillshade = shade * (1.85 + landRise * 0.62 + steep * 0.38);
+  const shadow = Math.max(0, -shade) * (0.48 + steep * 0.75);
+  const sunlight = Math.max(0, shade) * (0.14 + landRise * 0.18);
+  const texture = (largeTexture - 0.5) * 6 + (fineTexture - 0.5) * 4 + (surfaceTexture - 0.5) * 3;
+  const valley = Math.max(0, 1 - Math.abs(fineTexture - 0.45) * 8) * (0.22 + moisture * 0.42) * (1 - landRise * 0.32);
+  const ridge = Math.max(0, 1 - Math.abs(ridgeTexture - 0.55) * 9) * minmax((height - 48) / 42, 0, 1) * (0.38 + steep * 0.9);
+  const contour = contourStrength(height, 25, 0.08) * 2;
+  const dryTint = smoothstep((0.4 - moisture) / 0.3) * smoothstep((temperature - 0.34) / 0.42);
+  const snowLine = 82 + (temperature - 0.42) * 12 + (largeTexture - 0.5) * 8;
+  const snow = smoothstep((height - snowLine) / 8);
+
+  let r = base[0] + hillshade + texture * 0.58 + sunlight * 0.45 - shadow * 0.7 + ridge * 38 - valley * 8 - contour + dryTint * 13;
+  let g = base[1] + hillshade * 0.92 + texture * 0.52 + sunlight * 0.36 - shadow * 0.72 + ridge * 31 - valley * 12 - contour * 0.9 + moisture * 7 - dryTint * 2;
+  let b = base[2] + hillshade * 0.76 + texture * 0.38 + sunlight * 0.25 - shadow * 0.62 + ridge * 24 - valley * 8 - contour * 0.72 - landRise * 6;
+
+  if (snow > 0) {
+    const snowMix = minmax(snow * (0.74 + ridge * 0.012), 0, 0.88);
+    r = r + (242 - r) * snowMix;
+    g = g + (242 - g) * snowMix;
+    b = b + (231 - b) * snowMix;
+  }
+
   return packRgb(r, g, b);
 }
 
@@ -1169,6 +1160,28 @@ function bilerp(v00: number, v10: number, v01: number, v11: number, tx: number, 
   return north + (south - north) * ty;
 }
 
+function sampleGridBicubic(field: Float32Array, cellsX: number, cellsY: number, gx: number, gy: number): number {
+  const x = Math.floor(gx);
+  const y = Math.floor(gy);
+  const tx = gx - x;
+  const ty = gy - y;
+  const rows = [-1, 0, 1, 2].map(offsetY => {
+    const yy = minmax(y + offsetY, 0, cellsY - 1);
+    const p0 = field[yy * cellsX + minmax(x - 1, 0, cellsX - 1)] ?? 0;
+    const p1 = field[yy * cellsX + minmax(x, 0, cellsX - 1)] ?? 0;
+    const p2 = field[yy * cellsX + minmax(x + 1, 0, cellsX - 1)] ?? 0;
+    const p3 = field[yy * cellsX + minmax(x + 2, 0, cellsX - 1)] ?? 0;
+    return cubicInterpolate(p0, p1, p2, p3, tx);
+  });
+  return cubicInterpolate(rows[0], rows[1], rows[2], rows[3], ty);
+}
+
+function cubicInterpolate(p0: number, p1: number, p2: number, p3: number, t: number): number {
+  const t2 = t * t;
+  const t3 = t2 * t;
+  return 0.5 * (2 * p1 + (-p0 + p2) * t + (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2 + (-p0 + 3 * p1 - 3 * p2 + p3) * t3);
+}
+
 function smoothstep(t: number): number {
   const clamped = minmax(t, 0, 1);
   return clamped * clamped * (3 - 2 * clamped);
@@ -1186,6 +1199,13 @@ function valueNoise2(x: number, y: number, scale: number, salt: number): number 
   const v01 = latticeHash(x0, y0 + 1, salt);
   const v11 = latticeHash(x0 + 1, y0 + 1, salt);
   return bilerp(v00, v10, v01, v11, tx, ty);
+}
+
+function terrainNoise2(x: number, y: number, scale: number, salt: number): number {
+  const n1 = valueNoise2(x, y, scale, salt);
+  const n2 = valueNoise2(x * 0.73 + y * 0.51, y * 0.73 - x * 0.51, scale * 0.56, salt + 101);
+  const n3 = valueNoise2(x * 1.18 - y * 0.32, y * 1.18 + x * 0.32, scale * 0.28, salt + 211);
+  return n1 * 0.54 + n2 * 0.3 + n3 * 0.16;
 }
 
 function latticeHash(x: number, y: number, salt: number): number {
@@ -1531,6 +1551,28 @@ function drawCoastlines(
     context.stroke(cell.path);
     context.strokeStyle = "rgba(42, 82, 91, 0.28)";
     context.lineWidth = 5;
+    context.stroke(cell.path);
+  }
+  context.restore();
+}
+
+function drawReliefCoastline(
+  context: CanvasRenderingContext2D,
+  view: Viewport,
+  bounds: [number, number, number, number],
+  cull: boolean
+): void {
+  const width = Math.max(0.5, 1.1 / Math.sqrt(Math.max(view.scale, 0.24)));
+  context.save();
+  context.lineJoin = "round";
+  context.lineCap = "round";
+  for (const cell of terrainCells) {
+    if (!cell.isCoast || (cull && !isPointInBounds(cell.point, bounds))) continue;
+    context.strokeStyle = "rgba(252, 239, 174, 0.28)";
+    context.lineWidth = width * 2.4;
+    context.stroke(cell.path);
+    context.strokeStyle = "rgba(20, 58, 66, 0.2)";
+    context.lineWidth = width;
     context.stroke(cell.path);
   }
   context.restore();
