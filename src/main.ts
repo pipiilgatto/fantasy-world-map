@@ -84,6 +84,32 @@ const RELIEF_STOPS: Array<[number, [number, number, number]]> = [
   [100, [232, 229, 213]]
 ];
 
+const SATELLITE_LAND_STOPS: Array<[number, [number, number, number]]> = [
+  [SEA_LEVEL, [150, 148, 76]],
+  [24, [96, 126, 55]],
+  [34, [48, 96, 44]],
+  [50, [35, 79, 38]],
+  [62, [68, 86, 49]],
+  [72, [111, 98, 70]],
+  [83, [142, 139, 126]],
+  [94, [218, 219, 207]],
+  [100, [248, 248, 238]]
+];
+
+const REGION_LABELS = [
+  "THE NORTH",
+  "THE NECK",
+  "THE RIVERLANDS",
+  "THE WESTERLANDS",
+  "THE CROWNLANDS",
+  "THE REACH",
+  "THE STORMLANDS",
+  "THE VALE",
+  "THE IRON ISLES"
+];
+
+const WATER_LABELS = ["THE NARROW SEA", "BAY OF MISTS", "IRONMAN'S BAY", "BLACKWATER BAY"];
+
 interface Stroke {
   id: string;
   kind: StrokeKind;
@@ -140,6 +166,7 @@ interface Viewport {
 }
 
 interface TerrainCell {
+  index: number;
   path: Path2D;
   color: string;
   height: number;
@@ -169,6 +196,28 @@ interface NaturalSymbol {
   color: string;
 }
 
+interface TerrainRidge {
+  id: string;
+  x: number;
+  y: number;
+  angle: number;
+  length: number;
+  width: number;
+  snow: number;
+  opacity: number;
+}
+
+interface MapLabel {
+  id: string;
+  kind: "region" | "water";
+  text: string;
+  x: number;
+  y: number;
+  angle: number;
+  size: number;
+  tracking: number;
+}
+
 interface AtlasData {
   lakeCells: Set<number>;
   riverCells: Set<number>;
@@ -176,6 +225,8 @@ interface AtlasData {
   rivers: River[];
   symbols: NaturalSymbol[];
   texture: NaturalSymbol[];
+  ridges: TerrainRidge[];
+  labels: MapLabel[];
 }
 
 let state = loadState();
@@ -198,7 +249,9 @@ let atlas: AtlasData = {
   coastCells: new Set(),
   rivers: [],
   symbols: [],
-  texture: []
+  texture: [],
+  ridges: [],
+  labels: []
 };
 let viewport: Viewport = {scale: 1, x: 0, y: 0};
 let minScale = 1;
@@ -623,7 +676,7 @@ function buildTerrainCells(): void {
   const riverCells = new Set<number>();
   for (const river of rivers) river.cells.forEach(cell => riverCells.add(cell));
   const coastCells = getCoastCells(lakeCells);
-  atlas = {lakeCells, riverCells, coastCells, rivers, symbols: [], texture: []};
+  atlas = {lakeCells, riverCells, coastCells, rivers, symbols: [], texture: [], ridges: [], labels: []};
   heightField = new Float32Array(heights.length);
   moistureField = new Float32Array(heights.length);
   temperatureField = new Float32Array(heights.length);
@@ -660,6 +713,7 @@ function buildTerrainCells(): void {
     ruggednessField[index] = ruggedness;
     lakeField[index] = isLake ? 1 : 0;
     terrainCells.push({
+      index,
       path,
       color: `rgb(${red} ${green} ${blue})`,
       height,
@@ -675,6 +729,8 @@ function buildTerrainCells(): void {
 
   atlas.symbols = generateNaturalSymbols();
   atlas.texture = generateTextureSymbols();
+  atlas.ridges = generateTerrainRidges();
+  atlas.labels = generateMapLabels();
   buildTerrainRaster();
 }
 
@@ -693,9 +749,13 @@ function drawTerrain(context: CanvasRenderingContext2D, view: Viewport, cull: bo
   context.drawImage(terrainRasterCanvas, 0, 0, WORLD_WIDTH, WORLD_HEIGHT);
 
   if (state.renderStyle !== "height") {
-    drawMapTexture(context, view, bounds, cull);
+    if (!state.creationMode) drawMapTexture(context, view, bounds, cull);
+    if (!state.creationMode && state.renderStyle === "terrain") drawTerrainRidges(context, view, bounds, cull);
     drawRiversLayer(context, bounds, cull);
-    drawNaturalSymbols(context, view, bounds, cull);
+    if (!state.creationMode) {
+      drawNaturalSymbols(context, view, bounds, cull);
+      if (state.renderStyle === "terrain") drawMapLabels(context, view, bounds, cull);
+    }
   } else {
     drawCoastGlow(context);
   }
@@ -716,7 +776,7 @@ function buildTerrainRaster(): void {
   if (!context) return;
 
   const rasterHeightField = smoothGridField(heightField, 3);
-  const rasterMoistureField = smoothGridField(moistureField, 2);
+  const rasterMoistureField = smoothGridField(moistureField, 3);
   const rasterTemperatureField = smoothGridField(temperatureField, 2);
   const rasterRuggednessField = smoothGridField(ruggednessField, 1);
   const rasterLakeField = smoothGridField(lakeField, 1);
@@ -791,6 +851,7 @@ function buildTerrainRaster(): void {
       const east = h10 + (h11 - h10) * ty;
       const north = h00 + (h10 - h00) * tx;
       const south = h01 + (h11 - h01) * tx;
+      const slope = Math.hypot(west - east, north - south);
       const shade = minmax((west - east) * 2.2 + (north - south) * 1.45, -24, 26);
       const isLake = lake > 0.32;
       const isCoast = sampledHeight >= SEA_LEVEL && sampledHeight < SEA_LEVEL + 5;
@@ -807,7 +868,8 @@ function buildTerrainRaster(): void {
         largeTexture,
         fineTexture,
         ridgeTexture,
-        surfaceTexture
+        surfaceTexture,
+        slope
       );
       const offset = (py * rasterWidth + px) * 4;
       data[offset] = (color >> 16) & 255;
@@ -832,7 +894,8 @@ function colorForSample(
   largeTexture: number,
   fineTexture: number,
   ridgeTexture: number,
-  surfaceTexture: number
+  surfaceTexture: number,
+  slope: number
 ): number {
   if (state.renderStyle === "height") {
     return colorForElevationView(height, shade, largeTexture, fineTexture);
@@ -843,51 +906,156 @@ function colorForSample(
   }
 
   if (height < SEA_LEVEL || biome === "lake") {
-    const depth = biome === "lake" ? minmax((34 - height) / 18, 0, 1) : minmax((SEA_LEVEL - height) / SEA_LEVEL, 0, 1);
-    const shallow = biome === "lake" ? [63, 127, 137] : [69, 139, 142];
-    const deep = biome === "lake" ? [28, 75, 104] : [7, 31, 56];
-    const surface = (largeTexture - 0.5) * 13 + (fineTexture - 0.5) * 7;
-    const glint = Math.max(0, 1 - Math.abs(ridgeTexture - 0.58) * 9) * 11;
-    const r = shallow[0] + (deep[0] - shallow[0]) * depth + surface + glint * 0.4;
-    const g = shallow[1] + (deep[1] - shallow[1]) * depth + surface + glint;
-    const b = shallow[2] + (deep[2] - shallow[2]) * depth + surface + glint * 1.2;
-    return packRgb(r + shade * 0.16, g + shade * 0.18, b + shade * 0.2);
+    return colorForSatelliteWater(height, biome === "lake", shade, largeTexture, fineTexture, ridgeTexture, surfaceTexture);
   }
 
-  const base = BIOME_PALETTE[biome];
-  const landRise = minmax((height - SEA_LEVEL) / 76, 0, 1);
-  const beach = 1 - smoothstep(minmax((height - SEA_LEVEL) / 5.6, 0, 1));
-  const highSnow = biome === "snow" ? 1 : smoothstep(minmax((height - 82) / 15, 0, 1)) * (1 - temperature);
-  const canopy = ["woodland", "forest", "rainforest", "taiga"].includes(biome) ? 1 : 0;
-  const dryGrass = ["desert", "savanna", "grassland", "highland"].includes(biome) ? 1 : 0;
-  const texture =
-    (largeTexture - 0.5) * (dryGrass ? 18 : 12) +
-    (fineTexture - 0.5) * (canopy ? 14 : 9) +
-    (ridgeTexture - 0.5) * (ruggedness > 14 || height > 62 ? 21 : 7) +
-    (surfaceTexture - 0.5) * (canopy ? 13 : 8);
-  const relief = shade * (1.08 + landRise * 0.7 + Math.min(ruggedness, 28) * 0.018);
-  const latitudeHaze = (Math.abs(y / WORLD_HEIGHT - 0.52) - 0.2) * 10;
+  return colorForSatelliteLand(
+    x,
+    y,
+    height,
+    moisture,
+    temperature,
+    ruggedness,
+    biome,
+    shade,
+    largeTexture,
+    fineTexture,
+    ridgeTexture,
+    surfaceTexture,
+    slope
+  );
+}
 
-  let r = base[0] + texture + relief + landRise * 6 - moisture * 3 + latitudeHaze;
-  let g = base[1] + texture * 0.8 + relief + moisture * 8 - landRise * 1.5;
-  let b = base[2] + texture * 0.55 + relief * 0.82 + temperature * 2 - landRise * 4;
+function colorForSatelliteWater(
+  height: number,
+  isLake: boolean,
+  shade: number,
+  largeTexture: number,
+  fineTexture: number,
+  ridgeTexture: number,
+  surfaceTexture: number
+): number {
+  const depth = isLake ? minmax((36 - height) / 20, 0, 1) : minmax((SEA_LEVEL - height) / SEA_LEVEL, 0, 1);
+  const shallow: [number, number, number] = isLake ? [33, 92, 108] : [18, 91, 106];
+  const mid: [number, number, number] = isLake ? [15, 55, 78] : [8, 44, 67];
+  const deep: [number, number, number] = isLake ? [7, 32, 52] : [3, 16, 35];
+  const base = depth < 0.34 ? mix(shallow, mid, depth / 0.34) : mix(mid, deep, (depth - 0.34) / 0.66);
+  const current = (largeTexture - 0.5) * 9 + (fineTexture - 0.5) * 7 + (surfaceTexture - 0.5) * 5;
+  const chop = Math.max(0, 1 - Math.abs(ridgeTexture - 0.52) * 20) * (isLake ? 4 : 7);
+  const shelfGlow = (1 - smoothstep(depth / 0.16)) * (isLake ? 5 : 14);
+  const r = base[0] + current * 0.45 + chop * 0.35 + shelfGlow * 0.16 + shade * 0.1;
+  const g = base[1] + current * 0.65 + chop * 0.75 + shelfGlow * 0.8 + shade * 0.12;
+  const b = base[2] + current + chop + shelfGlow + shade * 0.14;
+  return packRgb(r, g, b);
+}
+
+function colorForSatelliteLand(
+  x: number,
+  y: number,
+  height: number,
+  moisture: number,
+  temperature: number,
+  ruggedness: number,
+  biome: Biome,
+  shade: number,
+  largeTexture: number,
+  fineTexture: number,
+  ridgeTexture: number,
+  surfaceTexture: number,
+  slope: number
+): number {
+  const base = colorFromStops(SATELLITE_LAND_STOPS, height);
+  const landRise = minmax((height - SEA_LEVEL) / 80, 0, 1);
+  const beach = 1 - smoothstep((height - SEA_LEVEL) / 3.5);
+  const forest = smoothstep((moisture - 0.36) / 0.32) * (1 - smoothstep((height - 69) / 13));
+  const dry = smoothstep((0.34 - moisture) / 0.3) * smoothstep((temperature - 0.38) / 0.34);
+  const steep = minmax(slope / 12, 0, 1);
+  const mountain = smoothstep((height - 48) / 25) + smoothstep((ruggedness - 7) / 18) + steep * 0.42;
+  const snowLine = 73 + (temperature - 0.4) * 13 + (largeTexture - 0.5) * 9;
+  const snow = biome === "snow" ? 0.9 : smoothstep((height - snowLine) / 9);
+  const granular = valueNoise2(x + 17, y - 39, 4.8, 71) - 0.5;
+  const patchNoise = valueNoise2(x * 1.1 - 120, y * 0.92 + 46, 12, 73) - 0.5;
+  const canopySpeckle =
+    (fineTexture - 0.5) * (forest ? 36 : 13) +
+    (surfaceTexture - 0.5) * (forest ? 32 : 12) +
+    granular * (forest ? 13 : 6);
+  const broadMottle =
+    (valueNoise2(x + 80, y - 35, 58, 101) - 0.5) * 18 +
+    (valueNoise2(x - 45, y + 110, 17, 103) - 0.5) * 11;
+  const ridgeLine =
+    Math.max(0, 1 - Math.abs(ridgeTexture - 0.52) * 10) *
+    minmax((height - 47) / 34, 0, 1) *
+    (0.45 + steep * 0.95);
+  const drainage =
+    Math.max(0, 1 - Math.abs(fineTexture - 0.47) * 7.6) *
+    (0.22 + moisture * 0.26 + forest * 0.32) *
+    (1 - beach * 0.65) *
+    (1 - snow * 0.55);
+  const alpineGrain =
+    Math.max(0, 1 - Math.abs(surfaceTexture - 0.54) * 8.8) *
+    minmax((height - 54) / 34, 0, 1) *
+    (0.46 + steep * 0.72);
+  const relief = shade * (1.42 + landRise * 1.05 + Math.min(ruggedness, 34) * 0.03 + steep * 0.28);
+  const latitudeMist = Math.max(0, Math.abs(y / WORLD_HEIGHT - 0.5) - 0.23) * 12;
+
+  let r =
+    base[0] +
+    broadMottle * 0.68 +
+    canopySpeckle * 0.32 +
+    patchNoise * 5 +
+    relief +
+    landRise * 2 +
+    dry * 28 -
+    forest * 22 +
+    latitudeMist -
+    drainage * 11 +
+    alpineGrain * (18 + steep * 18);
+  let g =
+    base[1] +
+    broadMottle * 0.78 +
+    canopySpeckle * 0.78 +
+    patchNoise * 8 +
+    relief +
+    moisture * 10 -
+    dry * 7 -
+    mountain * 6 +
+    forest * 12 -
+    drainage * 15 +
+    alpineGrain * (17 + steep * 16);
+  let b =
+    base[2] +
+    broadMottle * 0.48 +
+    canopySpeckle * 0.44 +
+    patchNoise * 4 +
+    relief * 0.86 -
+    landRise * 6 -
+    dry * 13 +
+    forest * 2 -
+    drainage * 10 +
+    alpineGrain * (13 + steep * 12);
 
   if (beach > 0) {
-    r = r + (218 - r) * beach * 0.85;
-    g = g + (203 - g) * beach * 0.85;
-    b = b + (142 - b) * beach * 0.85;
+    r = r + (192 - r) * beach * 0.42;
+    g = g + (180 - g) * beach * 0.42;
+    b = b + (106 - b) * beach * 0.42;
   }
 
-  if (highSnow > 0) {
-    r = r + (238 - r) * highSnow * 0.72;
-    g = g + (237 - g) * highSnow * 0.72;
-    b = b + (222 - b) * highSnow * 0.72;
+  if (mountain > 0.1) {
+    const rock = minmax(mountain * 0.62, 0, 0.72);
+    const ridgeShadow = ridgeLine * Math.max(0, -shade) * 1.7;
+    const ridgeHighlight = ridgeLine * (42 + steep * 42);
+    r = r + (112 - r) * rock + ridgeHighlight - ridgeShadow * 0.9;
+    g = g + (111 - g) * rock + ridgeHighlight * 0.96 - ridgeShadow * 0.92;
+    b = b + (106 - b) * rock + ridgeHighlight * 0.86 - ridgeShadow * 0.82;
   }
 
-  const cloudlessSatelliteVariation = valueNoise2(x + 180, y - 70, 155, 27) - 0.5;
-  r += cloudlessSatelliteVariation * 9;
-  g += cloudlessSatelliteVariation * 7;
-  b += cloudlessSatelliteVariation * 5;
+  if (snow > 0) {
+    const snowBreak = minmax(0.78 + patchNoise * 0.34 + granular * 0.22 + ridgeLine * 0.36, 0.38, 1);
+    const snowMix = minmax(snow * snowBreak, 0, 0.92);
+    r = r + (240 - r) * snowMix;
+    g = g + (241 - g) * snowMix;
+    b = b + (230 - b) * snowMix;
+  }
 
   return packRgb(r, g, b);
 }
@@ -1197,6 +1365,17 @@ function getRuggedness(index: number, height: number): number {
   return diffs.length ? Math.max(...diffs) : 0;
 }
 
+function getTerrainGradient(index: number, height: number): Point {
+  if (!grid || !heights) return [0, 0];
+  const x = index % grid.cellsX;
+  const y = Math.floor(index / grid.cellsX);
+  const west = x > 0 ? heights[index - 1] : height;
+  const east = x < grid.cellsX - 1 ? heights[index + 1] : height;
+  const north = y > 0 ? heights[index - grid.cellsX] : height;
+  const south = y < grid.cellsY - 1 ? heights[index + grid.cellsX] : height;
+  return [west - east, north - south];
+}
+
 function getBiome(
   height: number,
   moisture: number,
@@ -1268,7 +1447,7 @@ function drawMapTexture(
   cull: boolean
 ): void {
   context.save();
-  context.globalAlpha = view.scale < fitScale * 2.2 ? 0.08 : 0.15;
+  context.globalAlpha = view.scale < fitScale * 2.2 ? 0.13 : 0.2;
   for (const mark of atlas.texture) {
     if (cull && !isPointInBounds([mark.x, mark.y], bounds)) continue;
     context.fillStyle = mark.color;
@@ -1276,6 +1455,64 @@ function drawMapTexture(
     context.ellipse(mark.x, mark.y, mark.size, mark.size * 0.55, mark.angle, 0, Math.PI * 2);
     context.fill();
   }
+  context.restore();
+}
+
+function drawTerrainRidges(
+  context: CanvasRenderingContext2D,
+  view: Viewport,
+  bounds: [number, number, number, number],
+  cull: boolean
+): void {
+  const detail = view.scale / fitScale;
+  if (detail < 0.48) return;
+  const thinning = detail < 0.78 ? 0.34 : detail < 1.2 ? 0.68 : 1;
+  const scaleGuard = Math.sqrt(Math.max(view.scale, 0.24));
+
+  context.save();
+  context.lineCap = "round";
+  context.lineJoin = "round";
+
+  for (const ridge of atlas.ridges) {
+    if (cull && !isPointInBounds([ridge.x, ridge.y], bounds)) continue;
+    if (thinning < 1 && hash01(Number(ridge.id.split("-").pop()) || 0, 77) > thinning) continue;
+
+    const half = ridge.length / 2;
+    const bow = ridge.length * 0.08;
+    const lineWidth = ridge.width / scaleGuard;
+    context.save();
+    context.translate(ridge.x, ridge.y);
+    context.rotate(ridge.angle);
+
+    context.globalAlpha = ridge.opacity * 0.58 * minmax(detail, 0.64, 1);
+    context.strokeStyle = "rgba(31, 28, 20, 0.34)";
+    context.lineWidth = lineWidth * 2.75;
+    context.beginPath();
+    context.moveTo(-half, lineWidth * 0.72);
+    context.quadraticCurveTo(0, bow + lineWidth * 0.6, half, -lineWidth * 0.18);
+    context.stroke();
+
+    context.globalAlpha = ridge.opacity * (0.42 + ridge.snow * 0.5) * minmax(detail, 0.72, 1);
+    context.strokeStyle = ridge.snow > 0.24 ? "rgba(244, 242, 220, 0.82)" : "rgba(173, 163, 134, 0.44)";
+    context.lineWidth = lineWidth * (ridge.snow > 0.24 ? 1.36 : 0.78);
+    context.beginPath();
+    context.moveTo(-half * 0.88, -lineWidth * 0.95);
+    context.quadraticCurveTo(0, -bow - lineWidth * 0.22, half * 0.86, -lineWidth * 0.42);
+    context.stroke();
+
+    if (detail > 1.08 && ridge.snow < 0.72) {
+      context.globalAlpha = ridge.opacity * 0.16;
+      context.strokeStyle = "rgba(246, 238, 198, 0.48)";
+      context.lineWidth = lineWidth * 0.48;
+      context.beginPath();
+      context.moveTo(-half * 0.46, -lineWidth * 2.15);
+      context.quadraticCurveTo(0, -bow * 0.45, half * 0.38, -lineWidth * 1.12);
+      context.stroke();
+    }
+
+    context.restore();
+  }
+
   context.restore();
 }
 
@@ -1309,9 +1546,10 @@ function drawRiversLayer(
   context.lineJoin = "round";
   for (const river of atlas.rivers) {
     if (cull && !river.points.some(point => isPointInBounds(point, bounds))) continue;
-    drawSmoothPath(context, river.points, `rgba(15, 56, 82, 0.45)`, river.width + 2.6);
-    drawSmoothPath(context, river.points, `rgba(74, 145, 163, 0.9)`, river.width);
-    drawSmoothPath(context, river.points, `rgba(184, 228, 222, 0.42)`, Math.max(0.7, river.width * 0.28));
+    const width = state.renderStyle === "terrain" ? river.width * 0.64 : river.width;
+    drawSmoothPath(context, river.points, `rgba(4, 19, 23, 0.42)`, width + 1.8);
+    drawSmoothPath(context, river.points, `rgba(8, 54, 69, 0.92)`, width);
+    drawSmoothPath(context, river.points, `rgba(85, 151, 151, 0.26)`, Math.max(0.45, width * 0.24));
   }
   context.restore();
 }
@@ -1340,16 +1578,68 @@ function drawNaturalSymbols(
   context.restore();
 }
 
+function drawMapLabels(
+  context: CanvasRenderingContext2D,
+  view: Viewport,
+  bounds: [number, number, number, number],
+  cull: boolean
+): void {
+  const detail = view.scale / fitScale;
+  if (detail < 0.62) return;
+  context.save();
+  context.textAlign = "center";
+  context.textBaseline = "middle";
+  for (const label of atlas.labels) {
+    if (cull && !isPointInBounds([label.x, label.y], bounds)) continue;
+    if (label.kind === "water" && detail < 0.86) continue;
+    drawSpacedLabel(context, label, view);
+  }
+  context.restore();
+}
+
+function drawSpacedLabel(context: CanvasRenderingContext2D, label: MapLabel, view: Viewport): void {
+  const letters = label.text.toUpperCase().split("");
+  const detail = view.scale / fitScale;
+  const screenSize = label.size * minmax(Math.sqrt(detail), 0.78, 1.24);
+  const fontSize = screenSize / Math.max(view.scale, 0.1);
+  const tracking = (label.tracking * minmax(Math.sqrt(detail), 0.72, 1.15)) / Math.max(view.scale, 0.1);
+  context.save();
+  context.translate(label.x, label.y);
+  context.rotate(label.angle);
+  context.font = `700 ${fontSize}px Georgia, "Times New Roman", serif`;
+  const widths = letters.map(letter => (letter === " " ? fontSize * 0.65 : context.measureText(letter).width));
+  const totalWidth = widths.reduce((sum, width) => sum + width, 0) + Math.max(0, letters.length - 1) * tracking;
+  let cursor = -totalWidth / 2;
+  context.lineWidth = Math.max(1.7 / Math.max(view.scale, 0.1), fontSize * 0.14);
+  context.strokeStyle = label.kind === "water" ? "rgba(5, 18, 29, 0.66)" : "rgba(13, 22, 13, 0.72)";
+  context.fillStyle = label.kind === "water" ? "rgba(182, 212, 215, 0.72)" : "rgba(248, 246, 226, 0.9)";
+  context.shadowColor = "rgba(0, 0, 0, 0.45)";
+  context.shadowBlur = 2.8;
+  context.shadowOffsetY = 1.1;
+
+  for (let index = 0; index < letters.length; index++) {
+    const letter = letters[index];
+    const width = widths[index];
+    if (letter !== " ") {
+      const x = cursor + width / 2;
+      context.strokeText(letter, x, 0);
+      context.fillText(letter, x, 0);
+    }
+    cursor += width + tracking;
+  }
+  context.restore();
+}
+
 function drawTree(context: CanvasRenderingContext2D, symbol: NaturalSymbol): void {
   context.save();
   context.translate(symbol.x, symbol.y);
   context.rotate(symbol.angle);
-  context.globalAlpha = 0.56;
+  context.globalAlpha = 0.26;
   context.fillStyle = symbol.color;
   context.beginPath();
   context.ellipse(0, 0, symbol.size * 1.1, symbol.size * 0.55, 0, 0, Math.PI * 2);
   context.fill();
-  context.globalAlpha = 0.24;
+  context.globalAlpha = 0.12;
   context.fillStyle = "rgba(8, 45, 25, 0.74)";
   context.beginPath();
   context.ellipse(symbol.size * 0.18, -symbol.size * 0.12, symbol.size * 0.52, symbol.size * 0.22, 0.2, 0, Math.PI * 2);
@@ -1362,7 +1652,7 @@ function drawPeak(context: CanvasRenderingContext2D, symbol: NaturalSymbol): voi
   context.save();
   context.translate(symbol.x, symbol.y);
   context.rotate(symbol.angle * 0.25);
-  context.globalAlpha = 0.62;
+  context.globalAlpha = 0.28;
   context.strokeStyle = symbol.color;
   context.lineWidth = Math.max(1.1, s * 0.16);
   context.lineCap = "round";
@@ -1370,7 +1660,7 @@ function drawPeak(context: CanvasRenderingContext2D, symbol: NaturalSymbol): voi
   context.moveTo(-s * 0.9, s * 0.28);
   context.quadraticCurveTo(-s * 0.22, -s * 0.58, s * 0.82, s * 0.06);
   context.stroke();
-  context.globalAlpha = 0.32;
+  context.globalAlpha = 0.2;
   context.strokeStyle = "rgba(255, 249, 223, 0.7)";
   context.lineWidth = Math.max(0.7, s * 0.08);
   context.beginPath();
@@ -1435,10 +1725,10 @@ function generateNaturalSymbols(): NaturalSymbol[] {
     ) {
       const color =
         cell.biome === "taiga"
-          ? "rgba(47, 91, 79, 0.76)"
+          ? "rgba(47, 91, 79, 0.48)"
           : cell.biome === "rainforest"
-            ? "rgba(24, 89, 56, 0.74)"
-            : "rgba(38, 98, 58, 0.72)";
+            ? "rgba(24, 89, 56, 0.48)"
+            : "rgba(38, 98, 58, 0.46)";
       symbols.push({
         id: `tree-${index}`,
         kind: "tree",
@@ -1464,7 +1754,7 @@ function generateNaturalSymbols(): NaturalSymbol[] {
         y: py,
         size: 4.6 + minmax(cell.height - 58, 0, 36) * 0.16 + hash01(index, 36) * 3,
         angle: (hash01(index, 37) - 0.5) * 0.5,
-        color: cell.biome === "snow" ? "rgba(215, 211, 196, 0.76)" : "rgba(111, 95, 77, 0.72)"
+        color: cell.biome === "snow" ? "rgba(226, 224, 207, 0.52)" : "rgba(103, 91, 75, 0.38)"
       });
       peaks++;
       continue;
@@ -1478,7 +1768,7 @@ function generateNaturalSymbols(): NaturalSymbol[] {
         y: py,
         size: 3 + hash01(index, 38) * 2.2,
         angle: hash01(index, 39) * Math.PI,
-        color: "rgba(57, 92, 69, 0.42)"
+        color: "rgba(57, 92, 69, 0.26)"
       });
       continue;
     }
@@ -1491,7 +1781,7 @@ function generateNaturalSymbols(): NaturalSymbol[] {
         y: py,
         size: 2.8 + hash01(index, 40) * 3.5,
         angle: hash01(index, 41) * Math.PI * 2,
-        color: "rgba(225, 219, 158, 0.32)"
+        color: "rgba(225, 219, 158, 0.22)"
       });
     }
   }
@@ -1528,6 +1818,125 @@ function generateTextureSymbols(): NaturalSymbol[] {
   }
 
   return marks;
+}
+
+function generateTerrainRidges(): TerrainRidge[] {
+  if (!grid || !heights) return [];
+  const ridges: TerrainRidge[] = [];
+  const limit = Math.min(720, Math.max(220, Math.round((grid.cellsDesired || 20000) / 58)));
+
+  for (const cell of terrainCells) {
+    if (ridges.length >= limit) break;
+    if (cell.height < 52 || cell.height < SEA_LEVEL || cell.isLake) continue;
+    if (!["highland", "mountain", "snow", "tundra"].includes(cell.biome)) continue;
+
+    const score = minmax((cell.height - 50) / 38, 0, 1) * 0.55 + minmax(cell.ruggedness / 28, 0, 1) * 0.45;
+    const chance = cell.biome === "snow" ? 0.34 : cell.biome === "mountain" ? 0.25 : cell.biome === "highland" ? 0.12 : 0.05;
+    if (hash01(cell.index, 61) > chance * minmax(score * 1.55, 0.3, 1.08)) continue;
+
+    const gradient = getTerrainGradient(cell.index, cell.height);
+    const gradientAngle = Math.atan2(gradient[1], gradient[0]);
+    const baseAngle = Number.isFinite(gradientAngle) ? gradientAngle + Math.PI / 2 : hash01(cell.index, 62) * Math.PI;
+    const angle = baseAngle + (hash01(cell.index, 63) - 0.5) * 0.82;
+    const snow = cell.biome === "snow" ? 0.9 : smoothstep((cell.height - 68) / 18) * (0.68 + hash01(cell.index, 64) * 0.28);
+
+    ridges.push({
+      id: `ridge-${cell.index}`,
+      x: cell.point[0] + (hash01(cell.index, 65) - 0.5) * grid.spacing * 1.25,
+      y: cell.point[1] + (hash01(cell.index, 66) - 0.5) * grid.spacing * 1.25,
+      angle,
+      length: 13 + score * 34 + hash01(cell.index, 67) * 18,
+      width: 0.7 + score * 1.02 + hash01(cell.index, 68) * 0.46,
+      snow,
+      opacity: 0.34 + score * 0.34 + hash01(cell.index, 69) * 0.14
+    });
+  }
+
+  return ridges;
+}
+
+function generateMapLabels(): MapLabel[] {
+  if (!grid || !heights) return [];
+  const labels: MapLabel[] = [];
+  const landBoxes: Array<[number, number, number, number, number]> = [
+    [0.18, 0.05, 0.82, 0.24, 0],
+    [0.25, 0.28, 0.72, 0.44, -0.04],
+    [0.34, 0.47, 0.76, 0.68, -0.22],
+    [0.06, 0.54, 0.42, 0.83, -0.42],
+    [0.58, 0.55, 0.92, 0.78, 0.16],
+    [0.2, 0.72, 0.62, 0.95, -0.1]
+  ];
+
+  for (let index = 0; index < landBoxes.length; index++) {
+    const [left, top, right, bottom, angle] = landBoxes[index];
+    const point = findLabelPoint([left, top, right, bottom], "region", labels);
+    if (!point) continue;
+    labels.push({
+      id: `region-label-${index}`,
+      kind: "region",
+      text: REGION_LABELS[index % REGION_LABELS.length],
+      x: point[0],
+      y: point[1],
+      angle,
+      size: index === 0 ? 27 : 16,
+      tracking: index === 0 ? 5.5 : 3.2
+    });
+  }
+
+  const waterBoxes: Array<[number, number, number, number, number]> = [
+    [0.58, 0.18, 0.98, 0.52, -0.25],
+    [0.02, 0.22, 0.24, 0.56, 0.78],
+    [0.0, 0.56, 0.28, 0.86, -0.16]
+  ];
+  for (let index = 0; index < waterBoxes.length; index++) {
+    const [left, top, right, bottom, angle] = waterBoxes[index];
+    const point = findLabelPoint([left, top, right, bottom], "water", labels);
+    if (!point) continue;
+    labels.push({
+      id: `water-label-${index}`,
+      kind: "water",
+      text: WATER_LABELS[index % WATER_LABELS.length],
+      x: point[0],
+      y: point[1],
+      angle,
+      size: 13,
+      tracking: 3.4
+    });
+  }
+
+  return labels;
+}
+
+function findLabelPoint(
+  box: [number, number, number, number],
+  kind: "region" | "water",
+  existing: MapLabel[]
+): Point | null {
+  if (!grid || !heights) return null;
+  const [left, top, right, bottom] = box;
+  const center: Point = [((left + right) / 2) * WORLD_WIDTH, ((top + bottom) / 2) * WORLD_HEIGHT];
+  let best: Point | null = null;
+  let bestScore = Infinity;
+
+  for (const cell of terrainCells) {
+    const [x, y] = cell.point;
+    if (x < left * WORLD_WIDTH || x > right * WORLD_WIDTH || y < top * WORLD_HEIGHT || y > bottom * WORLD_HEIGHT) continue;
+    const isWater = cell.height < SEA_LEVEL || cell.isLake;
+    if (kind === "region" && (isWater || cell.height > 78)) continue;
+    if (kind === "water" && !isWater) continue;
+    const labelDistance = existing.reduce((nearest, label) => Math.min(nearest, distance([x, y], [label.x, label.y])), Infinity);
+    if (labelDistance < 115) continue;
+    const elevationPenalty = kind === "region" ? Math.abs(cell.height - 42) * 2.4 : Math.abs(cell.height - 10) * 1.2;
+    const centerPenalty = distance([x, y], center);
+    const texturePenalty = Math.abs(hash01(Math.floor(x) + Math.floor(y) * 101, 88) - 0.52) * 60;
+    const score = centerPenalty + elevationPenalty + texturePenalty;
+    if (score < bestScore) {
+      bestScore = score;
+      best = [x, y];
+    }
+  }
+
+  return best;
 }
 
 function meanderPath(points: Point[], rng: () => number, intensity: number): Point[] {
@@ -1926,6 +2335,7 @@ function updateModeUi(): void {
   creationToggle.ariaLabel = state.creationMode ? "Exit creation mode" : "Enter creation mode";
   editCanvas.style.pointerEvents = "auto";
   if (!state.creationMode) editorDrawer.classList.remove("open");
+  renderBaseMap();
   renderEditLayer();
 }
 

@@ -6,7 +6,7 @@ Installable web app for generating Azgaar-style fantasy heightmaps, rendering th
 
 - Procedural heightmap templates ported from Azgaar's Fantasy Map Generator.
 - Precreated heightmap PNG support from Azgaar's public heightmap set.
-- High-resolution, Google Earth-inspired terrain raster generated from Azgaar-style height fields with smooth biomes, relief shading, lakes, rivers, beaches, and coastal water depth.
+- High-resolution, reference-map-inspired terrain raster generated from Azgaar-style height fields with satellite-style vegetation, coastal shelves, lakes, rivers, snow caps, vector ridgelines, and fantasy region typography.
 - Colored elevation and physical-map views with bathymetry, hypsometric land color, relief shading, and subtle contour lines.
 - Crisp zoom and pan with progressive natural detail instead of visible Voronoi cells.
 - Mobile creation mode with a hidden drawer for borders, capitals, towns, and roads.
