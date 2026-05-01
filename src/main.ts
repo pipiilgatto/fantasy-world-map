@@ -14,9 +14,9 @@ const WORLD_WIDTH = 1000;
 const WORLD_HEIGHT = 700;
 const STORAGE_KEY = "fantasy-world-map-state-v1";
 const SEA_LEVEL = 20;
-const TERRAIN_RASTER_SCALE = 4;
+const TERRAIN_RASTER_SCALE = 5;
 
-type StrokeKind = "border" | "road";
+type StrokeKind = "border" | "road" | "river";
 type Tool = StrokeKind | "capital" | "town";
 type RenderStyle = "terrain" | "height" | "relief";
 type Biome =
@@ -136,8 +136,10 @@ interface StoredState {
   creationMode: boolean;
   activeTool: Tool;
   borderColor: string;
+  riverColor: string;
   roadColor: string;
   borderWidth: number;
+  riverWidth: number;
   roadWidth: number;
   snapRoads: boolean;
   strokes: Stroke[];
@@ -153,8 +155,10 @@ const defaultState: StoredState = {
   creationMode: false,
   activeTool: "border",
   borderColor: "#b92e3a",
+  riverColor: "#1e6073",
   roadColor: "#7c5a2b",
   borderWidth: 5,
+  riverWidth: 4,
   roadWidth: 4,
   snapRoads: true,
   strokes: [],
@@ -275,28 +279,6 @@ updateViewportVars();
 
 app.innerHTML = `
   <div class="shell ${state.creationMode ? "creation" : ""} ${state.setupPanelOpen ? "setup-open" : ""}" id="shell">
-    <header class="topbar" id="topbar">
-      <div class="field compact">
-        <span>Template</span>
-        <select id="heightmapSelect"></select>
-      </div>
-      <div class="field seed-field">
-        <span>Seed</span>
-        <input id="seedInput" inputmode="numeric" autocomplete="off" />
-      </div>
-      <div class="field compact">
-        <span>Detail</span>
-        <select id="detailSelect">
-          <option value="10000">10k</option>
-          <option value="20000">20k</option>
-          <option value="30000">30k</option>
-          <option value="50000">50k</option>
-        </select>
-      </div>
-      <button class="button primary" id="generateButton" type="button">Generate</button>
-      <button class="button" id="randomButton" type="button">Random</button>
-    </header>
-
     <main class="map-stage" id="mapStage" aria-label="Fantasy world map editor">
       <canvas id="mapCanvas"></canvas>
       <canvas id="editCanvas"></canvas>
@@ -304,55 +286,79 @@ app.innerHTML = `
       <div class="status-pill" id="statusPill"></div>
     </main>
 
-    <nav class="floatbar" aria-label="Map actions">
-      <button class="button glass" id="setupToggle" type="button"></button>
-      <button class="button glass" id="creationToggle" type="button"></button>
-      <button class="button glass creation-only" id="toolsToggle" type="button">Tools</button>
+    <aside class="side-panel" id="sidePanel" aria-label="Map controls">
+      <button class="panel-tab" id="panelToggle" type="button" aria-label="Open controls">
+        <span>Map</span>
+        <span>Create</span>
+      </button>
+      <div class="panel-body">
+        <button class="panel-close" id="panelClose" type="button" aria-label="Close controls">Close</button>
+        <section class="panel-section" aria-label="Fantasy map generation">
+          <div class="section-title">Fantasy Map</div>
+          <label class="field">
+            <span>Template</span>
+            <select id="heightmapSelect"></select>
+          </label>
+          <div class="field-row">
+            <label class="field seed-field">
+              <span>Seed</span>
+              <input id="seedInput" inputmode="numeric" autocomplete="off" />
+            </label>
+            <label class="field compact">
+              <span>Detail</span>
+              <select id="detailSelect">
+                <option value="10000">10k</option>
+                <option value="20000">20k</option>
+                <option value="30000">30k</option>
+                <option value="50000">50k</option>
+              </select>
+            </label>
+          </div>
+          <div class="action-row">
+            <button class="button primary" id="generateButton" type="button">Generate</button>
+            <button class="button" id="randomButton" type="button">Random</button>
+          </div>
+        </section>
+
+        <section class="panel-section" aria-label="Creation tools">
+          <div class="section-title">Create</div>
+          <button class="mode-button" id="creationToggle" type="button"></button>
+          <div class="tool-grid" role="group" aria-label="Tool">
+            <button class="tool-button" data-tool="river" type="button">River</button>
+            <button class="tool-button" data-tool="border" type="button">Border</button>
+            <button class="tool-button" data-tool="capital" type="button">Capital</button>
+            <button class="tool-button" data-tool="town" type="button">Town</button>
+            <button class="tool-button" data-tool="road" type="button">Road</button>
+          </div>
+          <div class="drawer-fields" id="lineFields">
+            <label class="field">
+              <span id="activeColorLabel">Line color</span>
+              <input id="activeColor" type="color" />
+            </label>
+            <label class="field">
+              <span id="activeWidthLabel">Line width</span>
+              <input id="activeWidth" type="range" min="1" max="18" step="1" />
+            </label>
+          </div>
+          <label class="toggle-row">
+            <input id="snapRoads" type="checkbox" />
+            <span>Snap roads</span>
+          </label>
+          <div class="drawer-actions">
+            <button class="button" id="undoButton" type="button">Undo</button>
+            <button class="button" id="clearButton" type="button">Clear</button>
+            <button class="button" id="exportButton" type="button">PNG</button>
+          </div>
+        </section>
+      </div>
       <button class="button glass" id="installButton" type="button" hidden>Install</button>
-    </nav>
+    </aside>
 
     <nav class="zoombar" aria-label="Map zoom controls">
       <button class="button glass icon-button" id="zoomOutButton" type="button" aria-label="Zoom out">-</button>
       <button class="button glass fit-button" id="zoomFitButton" type="button">Fit</button>
       <button class="button glass icon-button" id="zoomInButton" type="button" aria-label="Zoom in">+</button>
     </nav>
-
-    <section class="editor-drawer" id="editorDrawer" aria-label="Creation tools">
-      <div class="drawer-grip"></div>
-      <div class="tool-grid" role="group" aria-label="Tool">
-        <button class="tool-button" data-tool="border" type="button">Border</button>
-        <button class="tool-button" data-tool="road" type="button">Road</button>
-        <button class="tool-button" data-tool="capital" type="button">Capital</button>
-        <button class="tool-button" data-tool="town" type="button">Town</button>
-      </div>
-      <div class="drawer-fields">
-        <label class="field">
-          <span>Border color</span>
-          <input id="borderColor" type="color" />
-        </label>
-        <label class="field">
-          <span>Border width</span>
-          <input id="borderWidth" type="range" min="1" max="18" step="1" />
-        </label>
-        <label class="field">
-          <span>Road color</span>
-          <input id="roadColor" type="color" />
-        </label>
-        <label class="field">
-          <span>Road width</span>
-          <input id="roadWidth" type="range" min="1" max="14" step="1" />
-        </label>
-      </div>
-      <label class="toggle-row">
-        <input id="snapRoads" type="checkbox" />
-        <span>Snap roads</span>
-      </label>
-      <div class="drawer-actions">
-        <button class="button" id="undoButton" type="button">Undo</button>
-        <button class="button" id="clearButton" type="button">Clear</button>
-        <button class="button" id="exportButton" type="button">PNG</button>
-      </div>
-    </section>
   </div>
 `;
 
@@ -362,10 +368,10 @@ const mapCanvas = document.querySelector<HTMLCanvasElement>("#mapCanvas")!;
 const editCanvas = document.querySelector<HTMLCanvasElement>("#editCanvas")!;
 const loading = document.querySelector<HTMLDivElement>("#loading")!;
 const statusPill = document.querySelector<HTMLDivElement>("#statusPill")!;
-const editorDrawer = document.querySelector<HTMLElement>("#editorDrawer")!;
-const setupToggle = document.querySelector<HTMLButtonElement>("#setupToggle")!;
+const sidePanel = document.querySelector<HTMLElement>("#sidePanel")!;
+const panelToggle = document.querySelector<HTMLButtonElement>("#panelToggle")!;
+const panelClose = document.querySelector<HTMLButtonElement>("#panelClose")!;
 const creationToggle = document.querySelector<HTMLButtonElement>("#creationToggle")!;
-const toolsToggle = document.querySelector<HTMLButtonElement>("#toolsToggle")!;
 const installButton = document.querySelector<HTMLButtonElement>("#installButton")!;
 const zoomOutButton = document.querySelector<HTMLButtonElement>("#zoomOutButton")!;
 const zoomFitButton = document.querySelector<HTMLButtonElement>("#zoomFitButton")!;
@@ -375,10 +381,11 @@ const heightmapSelect = document.querySelector<HTMLSelectElement>("#heightmapSel
 const detailSelect = document.querySelector<HTMLSelectElement>("#detailSelect")!;
 const generateButton = document.querySelector<HTMLButtonElement>("#generateButton")!;
 const randomButton = document.querySelector<HTMLButtonElement>("#randomButton")!;
-const borderColor = document.querySelector<HTMLInputElement>("#borderColor")!;
-const roadColor = document.querySelector<HTMLInputElement>("#roadColor")!;
-const borderWidth = document.querySelector<HTMLInputElement>("#borderWidth")!;
-const roadWidth = document.querySelector<HTMLInputElement>("#roadWidth")!;
+const lineFields = document.querySelector<HTMLDivElement>("#lineFields")!;
+const activeColor = document.querySelector<HTMLInputElement>("#activeColor")!;
+const activeWidth = document.querySelector<HTMLInputElement>("#activeWidth")!;
+const activeColorLabel = document.querySelector<HTMLSpanElement>("#activeColorLabel")!;
+const activeWidthLabel = document.querySelector<HTMLSpanElement>("#activeWidthLabel")!;
 const snapRoads = document.querySelector<HTMLInputElement>("#snapRoads")!;
 const undoButton = document.querySelector<HTMLButtonElement>("#undoButton")!;
 const clearButton = document.querySelector<HTMLButtonElement>("#clearButton")!;
@@ -402,6 +409,8 @@ function loadState(): StoredState {
       ...defaultState,
       ...parsed,
       renderStyle: "relief",
+      setupPanelOpen: false,
+      creationMode: false,
       strokes: Array.isArray(parsed.strokes) ? parsed.strokes : [],
       settlements: Array.isArray(parsed.settlements) ? parsed.settlements : []
     };
@@ -412,6 +421,30 @@ function loadState(): StoredState {
 
 function saveState(): void {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+}
+
+function getActiveStrokeColor(): string {
+  if (state.activeTool === "river") return state.riverColor;
+  if (state.activeTool === "road") return state.roadColor;
+  return state.borderColor;
+}
+
+function getActiveStrokeWidth(): number {
+  if (state.activeTool === "river") return state.riverWidth;
+  if (state.activeTool === "road") return state.roadWidth;
+  return state.borderWidth;
+}
+
+function setActiveStrokeColor(value: string): void {
+  if (state.activeTool === "river") state.riverColor = value;
+  else if (state.activeTool === "road") state.roadColor = value;
+  else if (state.activeTool === "border") state.borderColor = value;
+}
+
+function setActiveStrokeWidth(value: number): void {
+  if (state.activeTool === "river") state.riverWidth = value;
+  else if (state.activeTool === "road") state.roadWidth = value;
+  else if (state.activeTool === "border") state.borderWidth = value;
 }
 
 function populateHeightmapSelect(): void {
@@ -432,10 +465,6 @@ function hydrateControls(): void {
   seedInput.value = state.seed;
   heightmapSelect.value = state.heightmapId;
   detailSelect.value = String(state.cellsDesired);
-  borderColor.value = state.borderColor;
-  roadColor.value = state.roadColor;
-  borderWidth.value = String(state.borderWidth);
-  roadWidth.value = String(state.roadWidth);
   snapRoads.checked = state.snapRoads;
   if (isCompactLandscape()) state.setupPanelOpen = false;
   updateSetupUi();
@@ -493,48 +522,41 @@ function bindEvents(): void {
     void regenerateMap();
   });
 
-  setupToggle.addEventListener("click", () => {
+  panelToggle.addEventListener("click", () => {
     state.setupPanelOpen = !state.setupPanelOpen;
+    saveState();
+    updateSetupUi();
+  });
+
+  panelClose.addEventListener("click", () => {
+    state.setupPanelOpen = false;
     saveState();
     updateSetupUi();
   });
 
   creationToggle.addEventListener("click", () => {
     state.creationMode = !state.creationMode;
-    if (!state.creationMode) editorDrawer.classList.remove("open");
     saveState();
     updateModeUi();
-  });
-
-  toolsToggle.addEventListener("click", () => {
-    editorDrawer.classList.toggle("open");
   });
 
   document.querySelectorAll<HTMLButtonElement>("[data-tool]").forEach(button => {
     button.addEventListener("click", () => {
       state.activeTool = button.dataset.tool as Tool;
+      state.creationMode = true;
       saveState();
+      updateModeUi();
       updateToolButtons();
     });
   });
 
-  borderColor.addEventListener("input", () => {
-    state.borderColor = borderColor.value;
+  activeColor.addEventListener("input", () => {
+    setActiveStrokeColor(activeColor.value);
     saveState();
   });
 
-  roadColor.addEventListener("input", () => {
-    state.roadColor = roadColor.value;
-    saveState();
-  });
-
-  borderWidth.addEventListener("input", () => {
-    state.borderWidth = Number(borderWidth.value);
-    saveState();
-  });
-
-  roadWidth.addEventListener("input", () => {
-    state.roadWidth = Number(roadWidth.value);
+  activeWidth.addEventListener("input", () => {
+    setActiveStrokeWidth(Number(activeWidth.value));
     saveState();
   });
 
@@ -658,11 +680,9 @@ function renderBaseMap(): void {
 function buildTerrainCells(): void {
   if (!grid || !heights) return;
   const lakeCells = generateLakeCells();
-  const rivers = generateRivers(lakeCells);
   const riverCells = new Set<number>();
-  for (const river of rivers) river.cells.forEach(cell => riverCells.add(cell));
   const coastCells = getCoastCells(lakeCells);
-  atlas = {lakeCells, riverCells, coastCells, rivers, symbols: [], texture: [], ridges: [], labels: []};
+  atlas = {lakeCells, riverCells, coastCells, rivers: [], symbols: [], texture: [], ridges: [], labels: []};
   heightField = new Float32Array(heights.length);
   moistureField = new Float32Array(heights.length);
   temperatureField = new Float32Array(heights.length);
@@ -713,10 +733,10 @@ function buildTerrainCells(): void {
     });
   }
 
-  atlas.symbols = generateNaturalSymbols();
-  atlas.texture = generateTextureSymbols();
-  atlas.ridges = generateTerrainRidges();
-  atlas.labels = generateMapLabels();
+  atlas.symbols = [];
+  atlas.texture = [];
+  atlas.ridges = [];
+  atlas.labels = [];
   buildTerrainRaster();
 }
 
@@ -728,13 +748,9 @@ function drawTerrain(context: CanvasRenderingContext2D, view: Viewport, cull: bo
   context.translate(view.x, view.y);
   context.scale(view.scale, view.scale);
 
-  const bounds = getVisibleWorldBounds(view, 60, cull);
-
   context.imageSmoothingEnabled = true;
   context.imageSmoothingQuality = "high";
   context.drawImage(terrainRasterCanvas, 0, 0, WORLD_WIDTH, WORLD_HEIGHT);
-
-  drawRiversLayer(context, bounds, cull);
 
   context.restore();
   drawScreenAtmosphere(context, width, height);
@@ -856,7 +872,6 @@ function buildTerrainRaster(): void {
   }
 
   context.putImageData(image, 0, 0);
-  softenTerrainRaster(context, rasterWidth, rasterHeight);
 }
 
 function colorForSample(
@@ -875,19 +890,6 @@ function colorForSample(
   slope: number
 ): number {
   return colorForReliefView(height, moisture, temperature, ruggedness, shade, largeTexture, fineTexture, ridgeTexture, surfaceTexture, slope);
-}
-
-function softenTerrainRaster(context: CanvasRenderingContext2D, width: number, height: number): void {
-  const temp = document.createElement("canvas");
-  temp.width = width;
-  temp.height = height;
-  const tempContext = temp.getContext("2d");
-  if (!tempContext) return;
-  tempContext.drawImage(terrainRasterCanvas, 0, 0);
-  context.save();
-  context.filter = "blur(1.15px)";
-  context.drawImage(temp, 0, 0);
-  context.restore();
 }
 
 function colorForSatelliteWater(
@@ -2111,7 +2113,13 @@ function drawOverlay(
     if (stroke.points.length < 2) continue;
     const width = stroke.width / Math.max(viewScale, 0.15);
     const outline = 2.2 / Math.max(viewScale, 0.15);
-    if (stroke.kind === "road") {
+    if (stroke.kind === "river") {
+      context.globalAlpha = 0.94;
+      drawSmoothPath(context, stroke.points, "rgba(237, 252, 255, 0.56)", width + outline * 0.78);
+      drawSmoothPath(context, stroke.points, "rgba(9, 45, 67, 0.34)", width + outline * 0.32);
+      drawSmoothPath(context, stroke.points, stroke.color, width * 0.82);
+      drawSmoothPath(context, stroke.points, "rgba(147, 215, 230, 0.3)", Math.max(0.45 / Math.max(viewScale, 0.15), width * 0.22));
+    } else if (stroke.kind === "road") {
       context.globalAlpha = 0.92;
       drawSmoothPath(context, stroke.points, "rgba(255, 247, 214, 0.82)", width + outline);
       drawSmoothPath(context, stroke.points, "rgba(78, 54, 34, 0.38)", width + outline * 0.35);
@@ -2129,34 +2137,29 @@ function drawOverlay(
   context.globalAlpha = 1;
   for (const settlement of settlements) {
     const symbolScale = minmax(1 / viewScale, 0.56, 2.8);
-    if (settlement.kind === "capital") drawStar(context, settlement.x, settlement.y, symbolScale);
+    if (settlement.kind === "capital") drawCapital(context, settlement.x, settlement.y, symbolScale);
     else drawTown(context, settlement.x, settlement.y, symbolScale);
   }
   context.restore();
 }
 
-function drawStar(context: CanvasRenderingContext2D, x: number, y: number, scale = 1): void {
-  const outer = 14 * scale;
-  const inner = 6 * scale;
+function drawCapital(context: CanvasRenderingContext2D, x: number, y: number, scale = 1): void {
+  const outer = 12 * scale;
+  const inner = 6.2 * scale;
   context.save();
-  context.fillStyle = "#f9f3c7";
+  context.fillStyle = "rgba(250, 245, 220, 0.96)";
   context.strokeStyle = "#2d2518";
-  context.lineWidth = 2.4 * scale;
+  context.lineWidth = 2 * scale;
   context.shadowColor = "rgba(20, 13, 6, 0.38)";
-  context.shadowBlur = 3 * scale;
+  context.shadowBlur = 2.5 * scale;
   context.shadowOffsetY = 1 * scale;
   context.beginPath();
-  for (let index = 0; index < 10; index++) {
-    const radius = index % 2 === 0 ? outer : inner;
-    const angle = -Math.PI / 2 + (index * Math.PI) / 5;
-    const px = x + Math.cos(angle) * radius;
-    const py = y + Math.sin(angle) * radius;
-    if (index === 0) context.moveTo(px, py);
-    else context.lineTo(px, py);
-  }
-  context.closePath();
-  context.stroke();
+  context.arc(x, y, outer, 0, Math.PI * 2);
   context.fill();
+  context.stroke();
+  context.beginPath();
+  context.arc(x, y, inner, 0, Math.PI * 2);
+  context.stroke();
   context.restore();
 }
 
@@ -2213,8 +2216,8 @@ function onPointerDown(event: PointerEvent): void {
   currentStroke = {
     id: crypto.randomUUID(),
     kind: state.activeTool,
-    color: state.activeTool === "road" ? state.roadColor : state.borderColor,
-    width: state.activeTool === "road" ? state.roadWidth : state.borderWidth,
+    color: getActiveStrokeColor(),
+    width: getActiveStrokeWidth(),
     points: [point]
   };
   gesture = {type: "draw"};
@@ -2367,16 +2370,16 @@ function exportPng(): void {
 
 function updateSetupUi(): void {
   shell.classList.toggle("setup-open", state.setupPanelOpen);
-  setupToggle.textContent = state.setupPanelOpen ? "Hide" : "Setup";
-  setupToggle.ariaLabel = state.setupPanelOpen ? "Hide setup panel" : "Show setup panel";
+  sidePanel.classList.toggle("open", state.setupPanelOpen);
+  panelToggle.ariaLabel = state.setupPanelOpen ? "Close controls" : "Open controls";
 }
 
 function updateModeUi(): void {
   shell.classList.toggle("creation", state.creationMode);
-  creationToggle.textContent = state.creationMode ? "Exit" : "Create";
-  creationToggle.ariaLabel = state.creationMode ? "Exit creation mode" : "Enter creation mode";
+  creationToggle.textContent = state.creationMode ? "Drawing On" : "Drawing Off";
+  creationToggle.ariaLabel = state.creationMode ? "Turn drawing off" : "Turn drawing on";
+  creationToggle.classList.toggle("active", state.creationMode);
   editCanvas.style.pointerEvents = "auto";
-  if (!state.creationMode) editorDrawer.classList.remove("open");
   renderBaseMap();
   renderEditLayer();
 }
@@ -2385,6 +2388,17 @@ function updateToolButtons(): void {
   document.querySelectorAll<HTMLButtonElement>("[data-tool]").forEach(button => {
     button.classList.toggle("active", button.dataset.tool === state.activeTool);
   });
+  const strokeTool = state.activeTool === "river" || state.activeTool === "road" || state.activeTool === "border";
+  lineFields.hidden = !strokeTool;
+  snapRoads.closest(".toggle-row")?.classList.toggle("hidden", state.activeTool !== "road");
+  if (strokeTool) {
+    const label = state.activeTool[0].toUpperCase() + state.activeTool.slice(1);
+    activeColorLabel.textContent = `${label} color`;
+    activeWidthLabel.textContent = `${label} width`;
+    activeColor.value = getActiveStrokeColor();
+    activeWidth.max = state.activeTool === "road" ? "14" : "18";
+    activeWidth.value = String(getActiveStrokeWidth());
+  }
   statusPill.textContent = state.creationMode ? state.activeTool : statusPill.textContent;
 }
 
@@ -2474,11 +2488,12 @@ function updatePinchGesture(): void {
 }
 
 function getOrientation(): "landscape" | "portrait" {
-  return window.innerWidth > window.innerHeight ? "landscape" : "portrait";
+  return getViewportSize().width > getViewportSize().height ? "landscape" : "portrait";
 }
 
 function isCompactViewport(): boolean {
-  return window.innerWidth <= 920 || window.innerHeight <= 560;
+  const {width, height} = getViewportSize();
+  return width <= 920 || height <= 560;
 }
 
 function isCompactLandscape(): boolean {
@@ -2486,8 +2501,14 @@ function isCompactLandscape(): boolean {
 }
 
 function updateViewportVars(): void {
-  const viewportWidth = window.visualViewport?.width || window.innerWidth;
-  const viewportHeight = window.visualViewport?.height || window.innerHeight;
+  const {width: viewportWidth, height: viewportHeight} = getViewportSize();
   document.documentElement.style.setProperty("--app-vw", `${viewportWidth}px`);
   document.documentElement.style.setProperty("--app-vh", `${viewportHeight}px`);
+}
+
+function getViewportSize(): {width: number; height: number} {
+  return {
+    width: window.visualViewport?.width || window.innerWidth,
+    height: window.visualViewport?.height || window.innerHeight
+  };
 }

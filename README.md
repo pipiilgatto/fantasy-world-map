@@ -6,10 +6,10 @@ Installable web app for generating Azgaar-style fantasy terrain and rendering it
 
 - Procedural heightmap templates ported from Azgaar's Fantasy Map Generator.
 - Precreated heightmap PNG support from Azgaar's public heightmap set.
-- Single shaded relief map renderer with bathymetry, hypsometric land color, relief shading, snow caps, coastlines, rivers, and subtle contour lines.
-- Crisp zoom and pan with progressive natural detail instead of visible Voronoi cells.
-- Mobile creation mode with a hidden drawer for borders, capitals, towns, and roads.
-- Smoothed, screen-stable borders and cased roads with settlement snapping.
+- Single shaded relief map renderer with bathymetry, hypsometric land color, relief shading, snow caps, and coastlines.
+- Higher-resolution relief raster for crisp zoom and pan without generated river or label clutter.
+- Minimal right-side folded panel for fantasy map generation and creation tools.
+- User-drawn rivers, borders, cased roads, twin-circle capitals, and single-circle towns.
 - Local persistence for drawing layers.
 - PNG export.
 - PWA manifest and service worker for Android installation.
